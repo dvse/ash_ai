@@ -31,6 +31,8 @@ defmodule AshAi.Mcp.Server do
 
   alias AshAi.Tool
 
+  require Logger
+
   # Sent for a body that is not a JSON-RPC request object. The body itself is
   # not echoed: a non-object body arrives wrapped by Plug.Parsers as
   # `%{"_json" => value}`, so inspecting it describes something the client did
@@ -993,18 +995,18 @@ defmodule AshAi.Mcp.Server do
     |> Enum.map(fn %Tool{} = tool ->
       # MCP schemas are advisory (no grammar-constrained sampling), so the
       # OpenAI strict transformation defaults off here.
-      result = %{
+      tool = with_server_options(tool, opts)
+
+      %{
         "name" => to_string(tool.name),
+        "title" => Tool.title(tool),
         "description" => AshAi.Tools.description(tool),
         "inputSchema" =>
-          AshAi.Tools.parameter_schema(tool, strict: Keyword.get(opts, :strict, false))
+          AshAi.Tools.parameter_schema(tool, strict: Keyword.get(opts, :strict, false)),
+        "annotations" => annotations_to_map(Tool.annotations(tool))
       }
-
-      if Tool.has_meta?(tool) do
-        Map.put(result, "_meta", tool._meta)
-      else
-        result
-      end
+      |> put_if("outputSchema", AshAi.Tool.Schema.output_for_tool(tool))
+      |> put_meta(Tool.meta(tool))
     end)
     |> Enum.sort_by(& &1["name"])
   end
@@ -1033,7 +1035,7 @@ defmodule AshAi.Mcp.Server do
 
         case transform_tool_arguments(tool, tool_args, context, opts) do
           {:ok, transformed_args} ->
-            execute_resolved_tool(tool, transformed_args, context)
+            execute_resolved_tool(tool, transformed_args, context, opts)
 
           {:error, error_text} ->
             {:ok, tool_error_result(error_text)}
@@ -1068,32 +1070,186 @@ defmodule AshAi.Mcp.Server do
     end
   end
 
-  defp execute_resolved_tool(tool, arguments, context) do
-    case AshAi.Tools.execute(tool, arguments, context, encode?: false) do
-      {:ok, result, _} ->
+  defp execute_resolved_tool(tool, arguments, context, opts) do
+    tool = with_server_options(tool, opts)
+
+    case AshAi.Tools.execute(tool, arguments, context, encode?: false, policy_breakdown?: true) do
+      {:ok, result, raw_result} ->
         case encode_tool_result(tool, result) do
           {:ok, encoded_result} ->
             result =
               %{
                 "isError" => false,
-                "content" => [%{"type" => "text", "text" => encoded_result}]
+                "content" =>
+                  [%{"type" => "text", "text" => encoded_result}]
+                  |> add_hint(result_hint(tool, raw_result))
               }
               |> maybe_put_structured_content(result)
+              |> put_meta(
+                tool
+                |> Tool.meta()
+                |> put_if(
+                  "hyperbob/delivery_hints",
+                  delivery_hints(tool, arguments, raw_result, opts)
+                )
+              )
 
-            if Tool.has_meta?(tool) do
-              {:ok, Map.put(result, "_meta", tool._meta)}
-            else
-              {:ok, result}
-            end
+            {:ok, result}
 
           {:error, error_text} ->
             {:ok, tool_error_result(error_text)}
         end
 
+      # BLENDED-013: a policy denial carries a compact text; an anonymous caller is also
+      # told how to authenticate.
+      {:error, {:policy_denied, error_text}} ->
+        {:ok,
+         error_text
+         |> tool_error_result()
+         |> put_meta(www_authenticate(context[:actor], error_text, opts))}
+
       {:error, error_text} ->
         {:ok, tool_error_result(error_text)}
     end
   end
+
+  # BLENDED-012: the MCP server's `forbidden_fields` option overrides the DSL setting.
+  defp with_server_options(tool, opts) do
+    case Keyword.fetch(opts, :forbidden_fields) do
+      {:ok, forbidden_fields} -> %{tool | forbidden_fields: forbidden_fields}
+      :error -> tool
+    end
+  end
+
+  # BLENDED-009: MCP `ToolAnnotations` wire names.
+  defp annotations_to_map(annotations) do
+    %{
+      "readOnlyHint" => annotations.read_only?,
+      "destructiveHint" => annotations.destructive?,
+      "idempotentHint" => annotations.idempotent?,
+      "openWorldHint" => annotations.open_world?
+    }
+    |> put_if("title", annotations.title)
+  end
+
+  defp put_meta(result, meta) when meta == %{}, do: result
+  defp put_meta(result, meta), do: Map.put(result, "_meta", meta)
+
+  # BLENDED-007: from ash_hyperlang lib/ash_hyperlang/executor.ex:3758 (`result_hint/2`) — the
+  # hint function receives the raw (map) result; only a string hint is kept, and a raising
+  # hint function is ignored.
+  defp result_hint(%Tool{hints: hints}, raw_result)
+       when is_function(hints, 1) and is_map(raw_result) do
+    case hints.(raw_result) do
+      hint when is_binary(hint) -> hint
+      _other -> nil
+    end
+  rescue
+    _error -> nil
+  catch
+    _kind, _reason -> nil
+  end
+
+  defp result_hint(_tool, _raw_result), do: nil
+
+  defp add_hint(content, nil), do: content
+  defp add_hint(content, hint), do: content ++ [%{"type" => "text", "text" => hint}]
+
+  # BLENDED-008: from ash_hyperlang lib/ash_hyperlang/executor.ex:1332 (`delivery_hints/3`)
+  # and :1371 (`render_delivery_intent/2`). Each hint map is rendered as a call to an exposed
+  # tool when one matches its resource and action, otherwise as its note alone.
+  defp delivery_hints(%Tool{delivery_hints: nil}, _arguments, _raw_result, _opts), do: nil
+
+  defp delivery_hints(%Tool{} = tool, arguments, raw_result, opts) do
+    context = %{
+      tool: to_string(tool.name),
+      resource: tool.resource,
+      action: tool.action.name,
+      arguments: arguments,
+      result: raw_result
+    }
+
+    case tool.delivery_hints.(context) do
+      nil ->
+        nil
+
+      hints when is_list(hints) ->
+        exposed = tools(opts)
+
+        hints
+        |> Enum.filter(&is_map/1)
+        |> Enum.map(&render_delivery_hint(&1, tool.resource, exposed))
+        |> Enum.reject(&is_nil/1)
+        |> case do
+          [] -> nil
+          rendered -> rendered
+        end
+
+      _other ->
+        Logger.warning(
+          "AshAi delivery_hints for #{inspect(tool.resource)} returned a non-list value"
+        )
+
+        nil
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "AshAi delivery_hints for #{inspect(tool.resource)} failed: #{Exception.message(error)}"
+      )
+
+      nil
+  end
+
+  # BLENDED-008: from ash_hyperlang lib/ash_hyperlang/executor.ex:1523
+  # (`normalize_delivery_intent/2`) and :1534 (`delivery_intent_capability/3`).
+  defp render_delivery_hint(hint, default_resource, exposed) do
+    note = hint_value(hint, :note)
+    note = if is_binary(note), do: note
+    resource = hint_value(hint, :resource) || default_resource
+    action = to_string(hint_value(hint, :action))
+    args = hint_value(hint, :args)
+    args = if is_map(args), do: args, else: %{}
+
+    exposed
+    |> Enum.find(fn tool ->
+      tool.resource == resource and
+        action in ([tool.action.name, tool.interface]
+                   |> Enum.reject(&is_nil/1)
+                   |> Enum.map(&to_string/1))
+    end)
+    |> case do
+      nil ->
+        if note, do: %{"note" => note}
+
+      target ->
+        put_if(
+          %{"tool" => to_string(target.name), "arguments" => %{"input" => args}},
+          "note",
+          note
+        )
+    end
+  end
+
+  defp hint_value(hint, key), do: Map.get(hint, key) || Map.get(hint, to_string(key))
+
+  # BLENDED-013: `_meta["mcp/www_authenticate"]` asks an anonymous caller to sign in
+  # (RFC 6750 `WWW-Authenticate` challenge, as MCP clients such as ChatGPT read it).
+  defp www_authenticate(nil, error_text, opts) do
+    params =
+      [
+        opts[:resource_metadata_url] &&
+          ~s(resource_metadata="#{opts[:resource_metadata_url]}"),
+        ~s(error="insufficient_scope"),
+        ~s(error_description="#{error_text}")
+      ]
+      |> Enum.filter(& &1)
+      |> Enum.join(", ")
+
+    %{"mcp/www_authenticate" => ["Bearer " <> params]}
+  end
+
+  defp www_authenticate(_actor, _error_text, _opts), do: %{}
 
   defp encode_tool_result(%{action: %{type: :action, returns: nil}}, result), do: {:ok, result}
 
@@ -1103,8 +1259,10 @@ defmodule AshAi.Mcp.Server do
     error -> {:error, AshAi.Tool.Errors.format(error)}
   end
 
+  # BLENDED-010: a struct (e.g. a `Decimal` average or a `Date`) is encoded as a JSON scalar,
+  # not an object, so it is not structured content.
   defp maybe_put_structured_content(result, structured_content)
-       when is_map(structured_content),
+       when is_map(structured_content) and not is_struct(structured_content),
        do: Map.put(result, "structuredContent", structured_content)
 
   defp maybe_put_structured_content(result, _structured_content), do: result
