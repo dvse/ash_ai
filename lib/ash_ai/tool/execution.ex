@@ -8,6 +8,7 @@ defmodule AshAi.Tool.Execution do
   """
 
   require Ash.Expr
+  require Logger
 
   alias AshAi.Tool.Errors
 
@@ -23,7 +24,8 @@ defmodule AshAi.Tool.Execution do
       :select,
       :domain,
       encode?: true,
-      load_strict?: false
+      load_strict?: false,
+      forbidden_fields: :hide
     ]
   end
 
@@ -47,7 +49,7 @@ defmodule AshAi.Tool.Execution do
           identity: identity,
           get_by: get_by,
           arguments: tool_arguments
-        },
+        } = tool,
         client_arguments,
         context,
         run_opts \\ []
@@ -73,7 +75,8 @@ defmodule AshAi.Tool.Execution do
         load_strict?: load_strict?,
         select: select,
         domain: domain,
-        encode?: Keyword.get(run_opts, :encode?, true)
+        encode?: Keyword.get(run_opts, :encode?, true),
+        forbidden_fields: tool.forbidden_fields || :hide
       }
 
       try do
@@ -98,11 +101,49 @@ defmodule AshAi.Tool.Execution do
         end
       rescue
         error ->
-          {:error, Errors.format(error)}
+          format_error(error, tool, run_opts)
       catch
         {:tool_error, error_msg} ->
           {:error, error_msg}
       end
+    end
+  end
+
+  # BLENDED-013: from ash_hyperlang lib/ash_hyperlang/eval_actions/policy_breakdown.ex:13
+  # (`enrich/3`) and lib/ash_hyperlang/guest_error.ex:61 (`policy_denial/3`). With
+  # `policy_breakdown?: true` a policy denial logs the full Ash policy report host-side and
+  # returns `{:error, {:policy_denied, text}}` with a compact, stable text; every other error
+  # (including a forbidden error without policy failures) is formatted as upstream does.
+  defp format_error(error, tool, run_opts) do
+    error_class = Ash.Error.to_error_class(error)
+
+    with true <- Keyword.get(run_opts, :policy_breakdown?, false),
+         %Ash.Error.Forbidden{errors: errors} <- error_class,
+         [_ | _] = policy_errors <-
+           Enum.filter(errors, &match?(%Ash.Error.Forbidden.Policy{}, &1)) do
+      report =
+        Enum.map_join(
+          policy_errors,
+          "\n\n",
+          &Ash.Error.Forbidden.Policy.report(&1, help_text?: false)
+        )
+
+      action = to_string(tool.action.name)
+      resource = tool.resource |> Module.split() |> List.last()
+
+      Logger.warning(
+        "AshAi tool call denied\n" <>
+          "tool=#{tool.name}\n" <>
+          "resource=#{inspect(tool.resource)}\n" <>
+          "action=#{action}\n" <>
+          report
+      )
+
+      {:error,
+       {:policy_denied,
+        "access denied: tool #{tool.name}, action #{action} on resource #{resource} (policy_denied)"}}
+    else
+      _other -> {:error, Errors.format(error)}
     end
   end
 
@@ -115,8 +156,11 @@ defmodule AshAi.Tool.Execution do
     ]
   end
 
-  defp serialize_opts(%Context{select: nil} = ctx), do: [load: ctx.load]
-  defp serialize_opts(ctx), do: [load: ctx.load, select: ctx.select]
+  defp serialize_opts(%Context{select: nil} = ctx),
+    do: [load: ctx.load, forbidden_fields: ctx.forbidden_fields]
+
+  defp serialize_opts(ctx),
+    do: [load: ctx.load, select: ctx.select, forbidden_fields: ctx.forbidden_fields]
 
   defp run_read(resource, action, arguments, input, opts, nil, ctx) do
     sort = build_sort(arguments["sort"])
@@ -552,7 +596,8 @@ defmodule AshAi.Tool.Execution do
           action.returns,
           action.constraints,
           ctx.domain,
-          load: ctx.load
+          load: ctx.load,
+          forbidden_fields: ctx.forbidden_fields
         )
         |> encode_result(ctx)
       else

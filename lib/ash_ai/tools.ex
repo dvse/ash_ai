@@ -51,10 +51,37 @@ defmodule AshAi.Tools do
   Falls back to the action description, then to a generic sentence.
   """
   def description(%Tool{} = tool) do
-    String.trim(
-      tool.description || tool.action.description || "Call the #{tool.action.name} tool"
-    )
+    [
+      String.trim(
+        tool.description || tool.action.description || "Call the #{tool.action.name} tool"
+      ),
+      blocking_description(tool),
+      example_description(tool.example)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n\n")
   end
+
+  # BLENDED-005: from ash_hyperlang lib/ash_hyperlang/executor.ex:1251 (`function_marker/2`)
+  # and lib/ash_hyperlang/capability.ex:62 (`accepts_timeout_ms?/1`)
+  defp blocking_description(tool) do
+    cond do
+      not Tool.blocking?(tool) ->
+        nil
+
+      Enum.any?(tool.action.arguments, &(&1.name == :timeout_ms and &1.public?)) ->
+        "Blocking. This call waits up to its own timeout_ms, which defaults per action."
+
+      true ->
+        "Blocking."
+    end
+  end
+
+  # BLENDED-003: from ash_hyperlang lib/ash_hyperlang/executor.ex:1328 (`example_body/1`)
+  defp example_description(example) when is_binary(example) and example != "",
+    do: "Example:\n" <> String.trim(example)
+
+  defp example_description(_example), do: nil
 
   if Code.ensure_loaded?(ReqLLM) do
     alias AshAi.Tool.Builder

@@ -224,8 +224,11 @@ defmodule AshAi.Serializer do
         match?(%Ash.NotLoaded{}, Map.get(record, field.name)) ->
           acc
 
+        # BLENDED-012: from ash_hyperlang lib/ash_hyperlang/executor.ex:4398
         match?(%Ash.ForbiddenField{}, Map.get(record, field.name)) ->
-          acc
+          if opts[:forbidden_fields] == :display,
+            do: Map.put(acc, field.name, %{opaque: :forbidden}),
+            else: acc
 
         true ->
           new_load =

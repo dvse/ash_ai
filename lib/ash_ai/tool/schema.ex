@@ -28,6 +28,10 @@ defmodule AshAi.Tool.Schema do
       ) do
     strict? = Keyword.get(opts, :strict?, true)
 
+    # BLENDED-004: from ash_hyperlang lib/ash_hyperlang/domain.ex:205 — `refine?: false`
+    # omits the read query envelope, exactly as `action_parameters: []` does.
+    action_parameters = if tool.refine? == false, do: [], else: action_parameters
+
     for_action(domain, resource, action, action_parameters, tool_arguments,
       strict?: strict?,
       identity: identity,
@@ -111,6 +115,8 @@ defmodule AshAi.Tool.Schema do
     required_action_arguments =
       AshAi.OpenApi.required_write_attributes(resource, action.arguments, action)
 
+    required_inputs = Enum.uniq(required_action_arguments ++ required_tool_arguments)
+
     props_with_input =
       if Enum.empty?(properties) do
         %{}
@@ -120,10 +126,16 @@ defmodule AshAi.Tool.Schema do
             type: :object,
             properties: properties,
             additionalProperties: false,
-            required: Enum.uniq(required_action_arguments ++ required_tool_arguments)
+            required: required_inputs
           }
         }
       end
+
+    # BLENDED-011: from ash_hyperlang lib/ash_hyperlang/capability.ex:78
+    # (`required_arguments?/2`) — when no input is required, `input` itself is optional, so
+    # `{}` is a valid call.
+    required_top_level =
+      if required_inputs == [], do: [], else: Map.keys(props_with_input)
 
     %{
       type: :object,
@@ -134,7 +146,7 @@ defmodule AshAi.Tool.Schema do
           get_by_fields: get_by_fields,
           full_filter_schema?: Keyword.get(opts, :full_filter_schema?, false)
         ),
-      required: Map.keys(props_with_input) ++ Enum.map(get_by_fields, & &1.name),
+      required: required_top_level ++ Enum.map(get_by_fields, & &1.name),
       additionalProperties: false
     }
     |> Jason.encode!()
@@ -674,6 +686,378 @@ defmodule AshAi.Tool.Schema do
         }
 
         Map.put(sort_obj, :input_for_fields, input_for_fields)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # BLENDED-010: output schemas
+  #
+  # Types come from core Ash `Ash.Info.Manifest` (the generator's `ActionBuilder` `returns`,
+  # `ResourceBuilder` fields/relationships and `TypeResolver`), the same source ash_hyperlang
+  # documents its outputs from (ash_hyperlang lib/ash_hyperlang/capability.ex:9). The shapes
+  # mirror `AshAi.Tool.Execution` and `AshAi.Serializer` exactly: select/load, omitted nil
+  # and not-loaded record fields, union tagging, Decimal-as-string and the forbidden-field
+  # rendering of BLENDED-012.
+  # ---------------------------------------------------------------------------
+
+  alias Ash.Info.Manifest.Generator.{ActionBuilder, ResourceBuilder, TypeResolver}
+
+  @forbidden_marker %{
+    "type" => "object",
+    "properties" => %{"opaque" => %{"type" => "string", "enum" => ["forbidden"]}},
+    "required" => ["opaque"],
+    "additionalProperties" => false
+  }
+
+  @doc """
+  The MCP `outputSchema` for a tool, or `nil`.
+
+  Emitted when `output_schema?` is set (the default) and every result the tool can return
+  is a JSON object, i.e. is always carried as `structuredContent`. See `result_for_tool/1`.
+  """
+  def output_for_tool(%AshAi.Tool{output_schema?: false}), do: nil
+
+  def output_for_tool(%AshAi.Tool{} = tool) do
+    case result_for_tool(tool) do
+      %{"type" => "object"} = schema -> schema
+      _other -> nil
+    end
+  end
+
+  @doc """
+  The JSON Schema of a tool's serialized result: the JSON text content of a successful
+  `tools/call`, which is also its `structuredContent` whenever it is an object.
+
+  Returns `nil` for generic actions without a return type, whose result is the bare
+  string `"success"`.
+  """
+  def result_for_tool(%AshAi.Tool{} = tool) do
+    ctx = %{forbidden_fields: tool.forbidden_fields || :hide, visited: MapSet.new()}
+
+    case tool.action.type do
+      :read -> read_result(tool, ctx)
+      :action -> generic_result(tool, ctx)
+      _write -> record_schema(tool.resource, tool.select, tool.load, ctx)
+    end
+  end
+
+  defp read_result(%AshAi.Tool{get_by: get_by} = tool, ctx) when not is_nil(get_by) do
+    record_schema(tool.resource, tool.select, tool.load, ctx)
+  end
+
+  defp read_result(tool, ctx) do
+    tool
+    |> offered_result_types()
+    |> Enum.map(&read_result_type(&1, tool, ctx))
+    |> any_of()
+  end
+
+  # Mirrors `extract_result_types/1` and the `Map.take/2` in `read_query_properties/7`: the
+  # result types the input schema offers.
+  defp offered_result_types(%AshAi.Tool{refine?: false}), do: [:run_query]
+  defp offered_result_types(%AshAi.Tool{action_parameters: nil}), do: @all_result_types
+
+  defp offered_result_types(%AshAi.Tool{action_parameters: action_parameters}) do
+    case extract_result_types(action_parameters) do
+      {types, params} -> if :result_type in params, do: types, else: [:run_query]
+    end
+  end
+
+  defp read_result_type(:run_query, tool, ctx) do
+    records = %{
+      "type" => "array",
+      "items" => record_schema(tool.resource, tool.select, tool.load, ctx)
+    }
+
+    case tool.action.pagination do
+      %Ash.Resource.Actions.Read.Pagination{} = pagination ->
+        [
+          pagination.offset? && offset_page(records),
+          pagination.keyset? && keyset_page(records)
+        ]
+        |> Enum.filter(& &1)
+        |> any_of()
+
+      _unpaginated ->
+        records
+    end
+  end
+
+  defp read_result_type(:count, _tool, _ctx), do: %{"type" => "integer"}
+  defp read_result_type(:exists, _tool, _ctx), do: %{"type" => "boolean"}
+
+  # Mirrors `AshAi.Tool.Execution.execute_read/5`: the aggregate's result type comes from
+  # the field's declared type. A combination without a type (e.g. `avg` of an aggregate
+  # field, whose declared type is `nil`) is a tool error, so it contributes no result.
+  defp read_result_type(:aggregate, tool, ctx) do
+    for field <-
+          Ash.Resource.Info.fields(tool.resource, [:attributes, :aggregates, :calculations]),
+        field.public?,
+        kind <- [:max, :min, :sum, :avg, :count],
+        {:ok, type, constraints} <-
+          [Ash.Query.Aggregate.kind_to_type(kind, field.type, field.constraints || [])] do
+      schema = type |> TypeResolver.resolve(constraints) |> value_schema([], ctx)
+
+      # `avg` is typed `:float`, but the data layer may return a `Decimal`, which the
+      # serializer passes through and Jason encodes as a string.
+      if kind == :avg, do: any_of([schema, %{"type" => "string"}]), else: schema
+    end
+    |> Enum.concat([%{"type" => "null"}])
+    |> any_of()
+  end
+
+  defp offset_page(records) do
+    page(records, %{
+      "offset" => %{"type" => "integer"},
+      "next_offset" => %{"type" => ["integer", "null"]}
+    })
+  end
+
+  defp keyset_page(records) do
+    page(records, %{
+      "start_keyset" => %{"type" => ["string", "null"]},
+      "end_keyset" => %{"type" => ["string", "null"]}
+    })
+  end
+
+  defp page(records, properties) do
+    properties =
+      Map.merge(properties, %{
+        "results" => records,
+        "limit" => %{"type" => "integer"},
+        "has_more" => %{"type" => "boolean"},
+        "count" => %{"type" => "integer"}
+      })
+
+    %{
+      "type" => "object",
+      "properties" => properties,
+      "required" => properties |> Map.keys() |> List.delete("count") |> Enum.sort(),
+      "additionalProperties" => false
+    }
+  end
+
+  defp generic_result(%AshAi.Tool{action: %{returns: nil}}, _ctx), do: nil
+
+  defp generic_result(tool, ctx) do
+    schema =
+      tool.resource
+      |> ActionBuilder.build(tool.action)
+      |> Map.fetch!(:returns)
+      |> value_schema(tool.load, ctx)
+
+    if tool.action.allow_nil?, do: nullable(schema), else: schema
+  end
+
+  # A resource record as `AshAi.Serializer.serialize_attributes/3` renders it: the selected
+  # (default: public) attributes plus loaded fields, each present only when loaded, allowed
+  # and non-nil. A load function is resolved per call, so its extra fields are not known.
+  defp record_schema(resource, select, load, ctx) do
+    if MapSet.member?(ctx.visited, resource) do
+      %{"type" => "object"}
+    else
+      ctx = %{ctx | visited: MapSet.put(ctx.visited, resource)}
+
+      manifest =
+        ResourceBuilder.build(resource,
+          include_private_attributes?: true,
+          include_private_calculations?: true,
+          include_private_aggregates?: true,
+          include_private_relationships?: true
+        )
+
+      load_list = if is_list(load), do: load, else: []
+
+      properties =
+        (select || Enum.map(Ash.Resource.Info.public_attributes(resource), & &1.name))
+        |> Enum.concat(Enum.map(load_list, &load_key/1))
+        |> Enum.uniq()
+        |> Enum.flat_map(fn name ->
+          case record_field_schema(manifest, resource, name, nested_load(load_list, name), ctx) do
+            nil -> []
+            schema -> [{to_string(name), forbidden(schema, ctx)}]
+          end
+        end)
+        |> Map.new()
+
+      %{"type" => "object", "properties" => properties}
+      |> then(&if(is_list(load), do: Map.put(&1, "additionalProperties", false), else: &1))
+    end
+  end
+
+  defp record_field_schema(manifest, resource, name, load, ctx) do
+    cond do
+      field = manifest.fields[name] ->
+        value_schema(field.type, load, ctx)
+
+      relationship = manifest.relationships[name] ->
+        record = record_schema(relationship.destination, nil, load, ctx)
+
+        if relationship.cardinality == :many,
+          do: %{"type" => "array", "items" => record},
+          else: record
+
+      # A calculation with `field?: false` is absent from the manifest but still serialized
+      # when loaded.
+      field = Ash.Resource.Info.field(resource, name) ->
+        field.type |> TypeResolver.resolve(field.constraints || []) |> value_schema(load, ctx)
+
+      # Not a field: the serializer skips it (`!field -> acc`).
+      true ->
+        nil
+    end
+  end
+
+  defp load_key({key, _value}), do: key
+  defp load_key(key), do: key
+
+  defp nested_load(load, name) do
+    Enum.find_value(load, [], fn
+      {^name, value} -> value
+      _other -> nil
+    end)
+  end
+
+  # BLENDED-012: from ash_hyperlang lib/ash_hyperlang/executor.ex:4398 — `:display` renders
+  # a forbidden field as `%{opaque: :forbidden}`.
+  defp forbidden(schema, %{forbidden_fields: :display}),
+    do: %{"anyOf" => [schema, @forbidden_marker]}
+
+  defp forbidden(schema, _ctx), do: schema
+
+  # The non-nil value of a type, as `AshAi.Serializer.serialize_value/5` renders it.
+  # Named types: an enum resolves to its values; a NewType is unwrapped with its use-site
+  # constraints, as `AshAi.Serializer` does (`flatten_new_type/2`).
+  defp value_schema(%{kind: :type_ref, module: module, constraints: constraints}, load, ctx) do
+    if Ash.Type.NewType.new_type?(module) do
+      module
+      |> Ash.Type.NewType.subtype_of()
+      |> TypeResolver.resolve(Ash.Type.NewType.constraints(module, constraints))
+    else
+      TypeResolver.resolve_definition(module)
+    end
+    |> value_schema(load, ctx)
+  end
+
+  defp value_schema(%{kind: :array} = type, load, ctx) do
+    item = value_schema(type.item_type, load, ctx)
+    item = if type.constraints[:nil_items?], do: nullable(item), else: item
+    %{"type" => "array", "items" => item}
+  end
+
+  defp value_schema(%{kind: kind}, _load, _ctx)
+       when kind in [
+              :string,
+              :ci_string,
+              :uuid,
+              :decimal,
+              :date,
+              :datetime,
+              :utc_datetime,
+              :utc_datetime_usec,
+              :naive_datetime,
+              :time,
+              :time_usec,
+              :binary,
+              :atom
+            ],
+       do: %{"type" => "string"}
+
+  defp value_schema(%{kind: :integer}, _load, _ctx), do: %{"type" => "integer"}
+  defp value_schema(%{kind: :float}, _load, _ctx), do: %{"type" => "number"}
+  defp value_schema(%{kind: :boolean}, _load, _ctx), do: %{"type" => "boolean"}
+
+  defp value_schema(%{kind: :enum, values: values}, _load, _ctx),
+    do: %{"type" => "string", "enum" => Enum.map(values, &to_string/1)}
+
+  defp value_schema(%{kind: kind, resource_module: resource}, load, ctx)
+       when kind in [:resource, :embedded_resource],
+       do: record_schema(resource, nil, load, ctx)
+
+  defp value_schema(%{kind: :union, members: members}, load, ctx) do
+    members
+    |> Enum.map(&union_member_schema(&1, load, ctx))
+    |> any_of()
+  end
+
+  defp value_schema(%{kind: kind, fields: [_ | _] = fields} = type, load, ctx)
+       when kind in [:map, :keyword, :struct] do
+    # Map and keyword values carry only the fields they contain; a struct with an
+    # `instance_of` module always carries every declared field.
+    required = if kind == :struct and type.instance_of, do: fields, else: []
+    fields_schema(fields, required, load, ctx)
+  end
+
+  defp value_schema(%{kind: :tuple, element_types: [_ | _] = fields}, load, ctx),
+    do: fields_schema(fields, fields, load, ctx)
+
+  defp value_schema(%{kind: :map}, _load, _ctx), do: %{"type" => "object"}
+
+  # `term`, `unknown`, `duration`, and field-less structs/keywords/tuples are passed to
+  # Jason as-is.
+  defp value_schema(_type, _load, _ctx), do: %{}
+
+  defp fields_schema(fields, required, load, ctx) do
+    %{
+      "type" => "object",
+      "properties" =>
+        Map.new(fields, fn field ->
+          schema = value_schema(field.type, load, ctx)
+          {to_string(field.name), if(field.allow_nil?, do: nullable(schema), else: schema)}
+        end),
+      "required" => Enum.map(required, &to_string(&1.name)),
+      "additionalProperties" => false
+    }
+  end
+
+  # `%Ash.Union{}` values: a member serialized to a map gains a `type` key naming the
+  # member; any other member is wrapped as `%{type: member, value: serialized}`.
+  defp union_member_schema(%{name: name, type: type}, load, ctx) do
+    tag = %{"type" => "string", "enum" => [to_string(name)]}
+
+    case value_schema(type, load, ctx) do
+      %{"type" => "object"} = object ->
+        object
+        |> Map.update("properties", %{"type" => tag}, &Map.put(&1, "type", tag))
+        |> Map.update("required", ["type"], &Enum.uniq(["type" | &1]))
+
+      schema ->
+        wrapped = %{
+          "type" => "object",
+          "properties" => %{"type" => tag, "value" => schema},
+          "required" => ["type", "value"],
+          "additionalProperties" => false
+        }
+
+        # An untyped member may serialize to a map (tagged in place) or anything else
+        # (wrapped).
+        if schema == %{} do
+          any_of([
+            wrapped,
+            %{"type" => "object", "properties" => %{"type" => tag}, "required" => ["type"]}
+          ])
+        else
+          wrapped
+        end
+    end
+  end
+
+  defp nullable(schema) when schema == %{}, do: schema
+  defp nullable(schema), do: %{"anyOf" => [schema, %{"type" => "null"}]}
+
+  # One schema stays as is; object-only alternatives keep `"type": "object"` at the root so
+  # they still qualify as an MCP `outputSchema`.
+  defp any_of(schemas) do
+    case Enum.uniq(schemas) do
+      [schema] ->
+        schema
+
+      schemas ->
+        if Enum.all?(schemas, &match?(%{"type" => "object"}, &1)) do
+          %{"type" => "object", "anyOf" => schemas}
+        else
+          %{"anyOf" => schemas}
+        end
     end
   end
 end
