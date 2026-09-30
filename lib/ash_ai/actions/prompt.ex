@@ -375,7 +375,8 @@ if Code.ensure_loaded?(ReqLLM) do
         domain ->
           domain_actions =
             domain
-            |> AshAi.Info.tools()
+            |> AshAi.Info.action_tools()
+            |> Enum.concat(AshAi.Info.interface_tools(domain))
             |> Enum.group_by(& &1.resource, & &1.action)
             |> Map.to_list()
 

@@ -19,10 +19,12 @@ defmodule AshAi do
       AshAi.Transformers.ResourceTools,
       AshAi.Transformers.McpApps
     ],
-    verifiers: [AshAi.Verifiers.McpResourceActionsReturnString]
+    verifiers: [AshAi.Verifiers.McpResourceActionsReturnString, AshAi.Verifiers.VerifyExposures]
 
   defmodule Tool do
     @moduledoc "An action exposed to LLM agents"
+    @type t :: %__MODULE__{}
+
     defstruct [
       :name,
       :resource,
@@ -38,6 +40,17 @@ defmodule AshAi do
       :arguments,
       :_meta,
       :ui,
+      # BLENDED-003..012 (see BLENDED.md)
+      :example,
+      :blocking?,
+      :hints,
+      :delivery_hints,
+      :forbidden_fields,
+      :interface,
+      refine?: true,
+      continuation_target?: false,
+      annotations: [],
+      output_schema?: true,
       full_filter_schema?: false,
       load_strict?: false,
       __spark_metadata__: nil
@@ -63,6 +76,100 @@ defmodule AshAi do
         do: true
 
     def has_meta?(_), do: false
+
+    @doc """
+    Whether a call to this tool blocks until its result is ready.
+
+    An explicit `blocking?` option wins. Otherwise an action that carries `metadata` (every
+    non-generic action) is blocking when it declares `metadata :blocking?` defaulting to `true`
+    (or to a zero-arity function returning `true`); a generic action is blocking when it, or
+    the interface exposing it, is named `:await`.
+    """
+    # BLENDED-005: from ash_hyperlang lib/ash_hyperlang/surface.ex:152
+    def blocking?(%__MODULE__{blocking?: value}) when is_boolean(value), do: value
+
+    def blocking?(%__MODULE__{action: action, interface: interface}),
+      do: blocking_action?(action, interface)
+
+    # BLENDED-005: from ash_hyperlang lib/ash_hyperlang/surface.ex:155
+    defp blocking_action?(%{metadata: metadata}, _interface_name) when is_list(metadata) do
+      metadata_flag(metadata, :blocking?) == true
+    end
+
+    defp blocking_action?(%{name: name}, interface_name)
+         when name == :await or interface_name == :await,
+         do: true
+
+    defp blocking_action?(_action, _interface_name), do: false
+
+    # The carrier convention of ash_hyperlang `blocking_action?/2`: a declared metadata entry
+    # counts as `true` only when its default is `true` or a zero-arity function returning `true`.
+    # `nil` means the action does not declare the entry.
+    # BLENDED-005/009: from ash_hyperlang lib/ash_hyperlang/surface.ex:156
+    defp metadata_flag(metadata, name) do
+      case Enum.find(metadata, &(&1.name == name)) do
+        nil -> nil
+        %{default: default} when is_function(default, 0) -> default.() == true
+        %{default: default} -> default == true
+      end
+    end
+
+    @doc """
+    The MCP tool annotations (`title`, `read_only?`, `destructive?`, `idempotent?`,
+    `open_world?`) resolved from the `annotations` option, the action's
+    `metadata :read_only?`/`metadata :destructive?` declarations, and the action type.
+    """
+    # BLENDED-009: MCP spec `ToolAnnotations`; carrier pattern from ash_hyperlang
+    # lib/ash_hyperlang/surface.ex:155 (action metadata)
+    def annotations(%__MODULE__{annotations: annotations, action: action}) do
+      annotations = annotations || []
+      metadata = Map.get(action, :metadata) || []
+      {read_only?, destructive?} = type_annotations(action.type)
+
+      %{
+        title: annotations[:title],
+        read_only?:
+          first_boolean(
+            [annotations[:read_only?], metadata_flag(metadata, :read_only?)],
+            read_only?
+          ),
+        destructive?:
+          first_boolean(
+            [annotations[:destructive?], metadata_flag(metadata, :destructive?)],
+            destructive?
+          ),
+        idempotent?: annotations[:idempotent?] == true,
+        open_world?: annotations[:open_world?] == true
+      }
+    end
+
+    defp first_boolean(values, default) do
+      Enum.find(values, default, &is_boolean/1)
+    end
+
+    defp type_annotations(:read), do: {true, false}
+    defp type_annotations(:create), do: {false, false}
+    defp type_annotations(type) when type in [:update, :destroy], do: {false, true}
+    defp type_annotations(:action), do: {false, true}
+
+    @doc "The MCP tool title: `annotations[:title]`, else the tool (interface) name."
+    def title(%__MODULE__{} = tool) do
+      (tool.annotations || [])[:title] || to_string(tool.name)
+    end
+
+    @doc """
+    Hyperbob `_meta` keys for the tool, merged over the upstream `_meta` map. Keys are only
+    present when their flag is set, so tools without them keep upstream's `_meta` exactly.
+    """
+    # BLENDED-005/006
+    def meta(%__MODULE__{} = tool) do
+      (tool._meta || %{})
+      |> put_flag("hyperbob/blocking", blocking?(tool))
+      |> put_flag("hyperbob/continuation_target", tool.continuation_target? == true)
+    end
+
+    defp put_flag(meta, key, true), do: Map.put(meta, key, true)
+    defp put_flag(meta, _key, false), do: meta
 
     @doc """
     Resolves the attribute keys used to address a record for update/destroy tools.
@@ -251,6 +358,76 @@ defmodule AshAi do
 
     @doc "Returns the fixed MIME type for MCP App UI resources."
     def mime_type, do: @mime_type
+  end
+
+  defmodule Expose do
+    @moduledoc """
+    A resource whose domain code interfaces are exposed as tools (BLENDED-001).
+
+    ```elixir
+    tools do
+      expose MyApp.Blog.Post do
+        interface :list_posts, example: ~s|{"input": {}}|
+        interface :publish_post, annotations: [destructive?: false]
+      end
+    end
+    ```
+
+    Each `interface` becomes one tool named after the interface, calling the action behind
+    the matching `define` in the domain `resources` block. Interfaces over non-public actions
+    are skipped.
+    """
+
+    # BLENDED-001: from ash_hyperlang lib/ash_hyperlang/domain.ex:47
+    defstruct [
+      :resource,
+      :delivery_hints,
+      :__identifier__,
+      interfaces: [],
+      __spark_metadata__: nil
+    ]
+
+    @type t :: %__MODULE__{}
+
+    defmodule Interface do
+      @moduledoc "One code interface exposed as a tool (BLENDED-001)."
+      # BLENDED-001: from ash_hyperlang lib/ash_hyperlang/domain.ex:1
+      defstruct [
+        :name,
+        :description,
+        :example,
+        :blocking?,
+        :hints,
+        :__identifier__,
+        refine?: true,
+        continuation_target?: false,
+        annotations: [],
+        output_schema?: true,
+        __spark_metadata__: nil
+      ]
+
+      @type t :: %__MODULE__{}
+    end
+
+    defmodule DeliveryHints do
+      @moduledoc "A resource-level delivery hint callback (BLENDED-008)."
+      # BLENDED-008: from ash_hyperlang lib/ash_hyperlang/domain.ex:33
+      defstruct [:callback, :__identifier__, __spark_metadata__: nil]
+
+      @type t :: %__MODULE__{}
+    end
+
+    @doc false
+    # BLENDED-008: from ash_hyperlang lib/ash_hyperlang/domain.ex:325 (`set_expose_name/1`)
+    def transform(%__MODULE__{} = expose) do
+      delivery_hints =
+        case expose.delivery_hints do
+          [%DeliveryHints{callback: callback} | _rest] -> callback
+          _other -> nil
+        end
+
+      {:ok, %{expose | delivery_hints: delivery_hints}}
+    end
   end
 
   defmodule FullText do
@@ -694,18 +871,30 @@ defmodule AshAi do
   end
 
   defp tools_for_domain(domain) do
-    domain_tools = attach_tool_runtime_details(AshAi.Info.tools(domain), domain)
+    domain_forbidden_fields = forbidden_fields_setting(domain, :hide)
+
+    domain_tools =
+      domain
+      |> AshAi.Info.action_tools()
+      |> Enum.concat(AshAi.Info.interface_tools(domain))
+      |> attach_tool_runtime_details(domain, domain_forbidden_fields)
 
     resource_tools =
       domain
       |> Ash.Domain.Info.resources()
       |> Enum.flat_map(fn resource ->
+        # BLENDED-012: a resource-level setting wins over the domain's.
+        forbidden_fields = forbidden_fields_setting(resource, domain_forbidden_fields)
+
         resource
-        |> AshAi.Info.tools()
-        |> attach_tool_runtime_details(domain)
+        |> AshAi.Info.action_tools()
+        |> attach_tool_runtime_details(domain, forbidden_fields)
       end)
 
-    ensure_unique_tool_names!(domain_tools ++ resource_tools, domain)
+    domain_tools
+    |> Enum.concat(resource_tools)
+    |> attach_delivery_hints(domain)
+    |> ensure_unique_tool_names!(domain)
   end
 
   defp tools_for_resource(resource) do
@@ -720,9 +909,34 @@ defmodule AshAi do
     |> Enum.filter(&(&1.resource == resource))
   end
 
-  defp attach_tool_runtime_details(tools, domain) do
+  defp attach_tool_runtime_details(tools, domain, forbidden_fields) do
     Enum.map(tools, fn tool ->
-      %{tool | domain: domain, action: Ash.Resource.Info.action(tool.resource, tool.action)}
+      %{
+        tool
+        | domain: domain,
+          action: Ash.Resource.Info.action(tool.resource, tool.action),
+          forbidden_fields: forbidden_fields
+      }
+    end)
+  end
+
+  defp forbidden_fields_setting(dsl, fallback) do
+    case AshAi.Info.tools_forbidden_fields(dsl) do
+      {:ok, value} -> value
+      :error -> fallback
+    end
+  end
+
+  # BLENDED-008: an `expose` block's `delivery_hints` apply to every tool on that resource.
+  defp attach_delivery_hints(tools, domain) do
+    hints_by_resource =
+      domain
+      |> AshAi.Info.exposes()
+      |> Enum.filter(& &1.delivery_hints)
+      |> Map.new(&{&1.resource, &1.delivery_hints})
+
+    Enum.map(tools, fn tool ->
+      %{tool | delivery_hints: Map.get(hints_by_resource, tool.resource)}
     end)
   end
 
@@ -743,9 +957,10 @@ defmodule AshAi do
         raise ArgumentError, """
         Duplicate tool names found in #{inspect(domain)}: #{Enum.join(names, ", ")}.
 
-        Tool names must be unique per domain across both:
+        Tool names must be unique per domain across:
         - domain-level `tools do ... end`
         - resource-level `tools do ... end`
+        - domain-level `expose ... interface` entries
         """
     end
   end

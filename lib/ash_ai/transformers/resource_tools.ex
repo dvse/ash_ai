@@ -18,6 +18,20 @@ defmodule AshAi.Transformers.ResourceTools do
     |> Transformer.get_entities([:tools])
     |> Enum.reduce(dsl_state, fn tool, dsl ->
       cond do
+        # BLENDED-001: `expose` is domain-level only.
+        match?(%AshAi.Expose{}, tool) and resource_dsl? ->
+          raise Spark.Error.DslError,
+            module: module,
+            path: [:tools, :expose, tool.resource],
+            message: """
+            `expose` is only allowed in a domain-level `tools` block.
+
+            Inside an Ash.Resource, define tools as `tool :name, :action`.
+            """
+
+        match?(%AshAi.Expose{}, tool) ->
+          dsl
+
         resource_dsl? and is_nil(tool.resource) ->
           Transformer.replace_entity(
             dsl,
@@ -57,10 +71,25 @@ defmodule AshAi.Transformers.ResourceTools do
   defp validate_tools!(dsl_state, module, resource_dsl?) do
     dsl_state
     |> Transformer.get_entities([:tools])
-    |> Enum.each(&validate_get_by!(&1, dsl_state, module, resource_dsl?))
+    |> Enum.filter(&match?(%AshAi.Tool{}, &1))
+    |> Enum.each(fn tool ->
+      validate_refine!(tool, module)
+      validate_get_by!(tool, dsl_state, module, resource_dsl?)
+    end)
 
     dsl_state
   end
+
+  # BLENDED-004: `refine?: false` is `action_parameters: []`; both may be given, but must agree.
+  defp validate_refine!(%{refine?: false, action_parameters: [_ | _]} = tool, module) do
+    raise Spark.Error.DslError,
+      module: module,
+      path: [:tools, tool.name, :refine?],
+      message:
+        "Tool `#{tool.name}` sets `refine?: false`, which omits the read query envelope, but also sets a non-empty `action_parameters`. Use one or the other."
+  end
+
+  defp validate_refine!(_tool, _module), do: :ok
 
   defp validate_get_by!(%{get_by: nil}, _dsl_state, _module, _resource_dsl?), do: :ok
 

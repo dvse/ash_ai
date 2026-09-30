@@ -13,7 +13,7 @@ defmodule AshAi.Transformers.McpApps do
     ui_resources = Spark.Dsl.Transformer.get_entities(dsl_state, [:mcp_resources])
 
     dsl_state
-    |> Spark.Dsl.Transformer.get_entities([:tools])
+    |> AshAi.Info.action_tools()
     |> Enum.filter(& &1.ui)
     |> Enum.reduce({:ok, dsl_state}, fn tool, {:ok, dsl} ->
       with {:ok, uri} <- resolve_ui(tool.ui, ui_resources, tool.name) do

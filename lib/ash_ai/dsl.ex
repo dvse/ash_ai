@@ -43,6 +43,65 @@ defmodule AshAi.Dsl do
     ]
   ]
 
+  # BLENDED-003..009: options shared by `tool` and `interface`.
+  # BLENDED-003: from ash_hyperlang lib/ash_hyperlang/domain.ex:201 (`example`)
+  # BLENDED-004: from ash_hyperlang lib/ash_hyperlang/domain.ex:205 (`refine?`)
+  # BLENDED-005: from ash_hyperlang lib/ash_hyperlang/domain.ex:210 (`blocking?`)
+  # BLENDED-006: from ash_hyperlang lib/ash_hyperlang/domain.ex:220 (`continuation_target`)
+  # BLENDED-007: from ash_hyperlang lib/ash_hyperlang/domain.ex:225 (`hints`)
+  @blended_tool_schema [
+    example: [
+      type: :string,
+      doc: "A worked example of calling the tool. Appended to the tool description."
+    ],
+    refine?: [
+      type: :boolean,
+      default: true,
+      doc:
+        "Set to `false` to omit the read query envelope (`filter`, `sort`, `limit`, `offset`, `result_type`). Equivalent to `action_parameters: []`; setting `refine?: false` together with a non-empty `action_parameters` is a compile error."
+    ],
+    blocking?: [
+      type: :boolean,
+      doc:
+        "Whether a call blocks until its result is ready. Defaults to the action's own `metadata :blocking?` declaration (or an action/interface named `:await`). Surfaces as `_meta[\"hyperbob/blocking\"]` and in the description."
+    ],
+    continuation_target?: [
+      type: :boolean,
+      default: false,
+      doc:
+        "Marks tools whose calls may be parked as await continuations. Surfaces as `_meta[\"hyperbob/continuation_target\"]`."
+    ],
+    hints: [
+      type: {:fun, 1},
+      doc:
+        "A function receiving the raw action result and returning a model-facing hint string or `nil`. The hint is appended to MCP `tools/call` results as a second text content block; `structuredContent` is unchanged."
+    ],
+    annotations: [
+      type: :keyword_list,
+      default: [],
+      keys: [
+        title: [type: :string, doc: "A human-readable title for the tool."],
+        read_only?: [type: :boolean, doc: "MCP `readOnlyHint`."],
+        destructive?: [type: :boolean, doc: "MCP `destructiveHint`."],
+        idempotent?: [type: :boolean, doc: "MCP `idempotentHint`."],
+        open_world?: [type: :boolean, doc: "MCP `openWorldHint`."]
+      ],
+      doc: """
+      MCP tool annotations. Unset hints default from the action: read actions are read-only and
+      non-destructive, create actions are neither, update/destroy actions are destructive, and
+      generic actions are destructive and not read-only. An action's own `metadata :read_only?`
+      / `metadata :destructive?` declaration (its `default`) overrides the type default.
+      `idempotent?` and `open_world?` default to `false`.
+      """
+    ],
+    output_schema?: [
+      type: :boolean,
+      default: true,
+      doc:
+        "Whether to emit an MCP `outputSchema`. Only emitted when every result the tool can return is a JSON object (i.e. always carried as `structuredContent`)."
+    ]
+  ]
+
   @tool_schema [
     name: [type: :atom, required: true],
     resource: [type: {:spark, Ash.Resource}, required: false],
@@ -260,17 +319,116 @@ defmodule AshAi.Dsl do
       ~s(tool :list_artists, Artist, :read, ui: "ui://artists/list.html")
     ],
     target: AshAi.Tool,
-    schema: @tool_schema,
+    schema: @tool_schema ++ @blended_tool_schema,
     args: [:name, {:optional, :resource}, :action],
     entities: [
       arguments: [@tool_argument]
     ]
   }
 
+  # BLENDED-008: from ash_hyperlang lib/ash_hyperlang/domain.ex:140
+  @delivery_hints %Spark.Dsl.Entity{
+    name: :delivery_hints,
+    target: AshAi.Expose.DeliveryHints,
+    args: [:callback],
+    describe: """
+    A per-resource callback returning a list of hint maps (`%{note: ..., action: ..., args: ...}`)
+    attached to MCP `tools/call` results for tools on the exposed resource, under
+    `_meta["hyperbob/delivery_hints"]`.
+    """,
+    examples: [
+      """
+      expose MyApp.Blog.Post do
+        delivery_hints fn
+          %{result: %{id: id}} -> [%{note: "Comment on it", action: :comment, args: %{post_id: id}}]
+          _context -> nil
+        end
+
+        interface :comment
+      end
+      """
+    ],
+    schema: [
+      callback: [
+        type: {:fun, 1},
+        required: true,
+        doc:
+          "Receives `%{tool:, resource:, action:, arguments:, result:}` and returns a list of hint maps or `nil`."
+      ]
+    ]
+  }
+
+  # BLENDED-001: from ash_hyperlang lib/ash_hyperlang/domain.ex:173
+  @interface %Spark.Dsl.Entity{
+    name: :interface,
+    target: AshAi.Expose.Interface,
+    args: [:name],
+    # No Spark `identifier`: Spark's nested uniqueness check would also compare every `tool`
+    # in the section by name at compile time, changing upstream's runtime duplicate error.
+    # `AshAi.Verifiers.VerifyExposures` checks interface names instead.
+    describe: """
+    Exposes one domain code interface (`define`) as a tool named after the interface, calling
+    the action behind that `define`.
+    """,
+    examples: [
+      ~s(interface :list_posts, description: "Lists posts visible to the caller.", example: ~s|{"input": {}}|)
+    ],
+    schema:
+      [
+        name: [
+          type: :atom,
+          required: true,
+          doc: "The domain code interface to expose. The tool uses this name verbatim."
+        ],
+        description: [
+          type: :string,
+          doc: "Agent-facing documentation. Overrides the underlying action description."
+        ]
+      ] ++ @blended_tool_schema
+  }
+
+  # BLENDED-001: from ash_hyperlang lib/ash_hyperlang/domain.ex:233
+  @expose %Spark.Dsl.Entity{
+    name: :expose,
+    target: AshAi.Expose,
+    args: [:resource],
+    identifier: :resource,
+    transform: {AshAi.Expose, :transform, []},
+    describe: """
+    Groups the code interfaces of one resource that are exposed as tools. Domain-level only;
+    each `interface` must match a `define` on that resource in the domain `resources` block.
+    """,
+    examples: [
+      """
+      expose MyApp.Blog.Post do
+        interface :list_posts
+        interface :create_post, description: "Creates a blog post."
+      end
+      """
+    ],
+    entities: [delivery_hints: [@delivery_hints], interfaces: [@interface]],
+    schema: [
+      resource: [
+        type: {:spark, Ash.Resource},
+        required: true,
+        doc: "The Ash resource whose domain code interfaces are exposed."
+      ]
+    ]
+  }
+
   @tools %Spark.Dsl.Section{
     name: :tools,
+    schema: [
+      # BLENDED-012: from ash_hyperlang lib/ash_hyperlang/eval_actions.ex:54
+      forbidden_fields: [
+        type: {:in, [:hide, :display]},
+        doc:
+          "How fields hidden by field policies appear in tool results. `:hide` (the default) omits them; `:display` renders `%{opaque: :forbidden}` so a caller can tell a forbidden field apart from an absent one. Resource-level settings win over the domain's."
+      ]
+    ],
     entities: [
-      @tool
+      @tool,
+      @expose
     ]
   }
 
