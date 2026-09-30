@@ -28,6 +28,7 @@ Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`
 | BLENDED-011 | Zero-input tools | When no input is required, the input schema requires nothing and `{}` is accepted (ChatGPT entrypoints need this). | hyperlang `Capability.required_arguments?`, arity-0 imports |
 | BLENDED-012 | `forbidden_fields` option on the MCP server/`tools` section (`:hide` default, `:display`) | How field-policy-forbidden fields appear in results. `outputSchema` must agree. | hyperlang `eval_actions forbidden_fields` |
 | BLENDED-013 | Policy breakdown on forbidden calls | The full Ash policy report is logged host-side; the caller gets a compact `isError` text with the tool name and a stable category. When the actor is nil, add `_meta["mcp/www_authenticate"]`. | hyperlang `EvalActions.PolicyBreakdown`, `GuestError.policy_denial` |
+| BLENDED-014 | `AshAi.McpActions` resource extension (`mcp_actions` section) | Synthesizes one public generic action (default `:mcp`, argument `request: :map`, returns `%{status, headers, body}`) whose run builds the request as an in-memory `Plug.Conn` and calls `AshAi.Mcp.Server.handle_post/4` with the action's actor/tenant/context and the section's server options (`otp_app`, `tools`, `actions`, `mcp_resources`, `exclude_actions`, `forbidden_fields`, `strict`, `mcp_name`, `mcp_server_version`, `instructions`, `protocol_version_statement`, `list_ttl_ms`, `read_ttl_ms`, `cache_scope`, `resource_metadata_url`). A host that already exposes resource actions (Hyperbob's publication gateway) publishes an MCP endpoint as that one action. | hyperlang `AshHyperlang.EvalActions` (section, `Transformers.AddActions`, `Run.*`) |
 
 ## MCP server output (`AshAi.Mcp.Server`)
 
@@ -102,6 +103,20 @@ Details the table above leaves open, resolved while implementing this branch.
   `resource_metadata="<url>"` when the server has a `resource_metadata_url` option. Tools that
   upstream's permission pre-check already hides stay hidden (`Tool not found`).
 
+- **BLENDED-014** — `request` is `%{body, headers, server_url}` (string or atom keys). `body` is
+  the JSON-RPC message as `Plug.Parsers` would leave it (decoded JSON), or raw text, which the
+  server parses (`-32700` on bad JSON). `headers` maps lower-case names to a string or a list
+  (a list keeps a repeated header repeated, so the 2026-07-28 header checks see it);
+  `mcp-session-id` is the session id, as `AshAi.Mcp.Router.get_session_id/1` reads it.
+  `server_url`, when given, replaces `server_url(conn)`. The response is exactly what the
+  server sent: `status`, `headers` (a map) and `body` (the text; the SSE text for
+  `subscriptions/listen`; `""` for 202). The HTTP layer stays the host's: routing, the
+  `Origin` check (`check_origin/2`), `GET` (405) and `DELETE`, body limits and authentication.
+  The conn has no owner, so no `:plug_conn` message reaches the caller's mailbox. The action's
+  own policies apply first; `tools/list` is then filtered for the action's actor by upstream's
+  permission pre-check. OAuth bearer tokens would be verified by the host, which then invokes
+  the action as the token's actor; nothing in the action changes.
+
 ## Tests (the oracle)
 
 Every BLENDED row has ExUnit coverage beside the upstream tests, and all upstream tests still
@@ -115,6 +130,10 @@ pass. The Bobstack port's parity rows are these tests plus upstream's.
   every result shape, validating the text content against `result_for_tool/1` and
   `structuredContent` against `outputSchema` with `JsonXema` (already a dependency through
   `ash_json_api`).
+- `test/ash_ai/blended/mcp_action_test.exs` — BLENDED-014: the synthesized action (public,
+  argument and return), `initialize`/`tools/list`/`tools/call`/`resources/read`/2026-07-28
+  requests through `Ash.run_action/2`, the action's actor reaching tools, tool and action
+  policy denials, and the in-memory conn. Support: `test/support/mcp_actions.ex`.
 - `test/COVERAGE.md` — per-module coverage before and after, and the new-line coverage check.
 
 ## Upstreaming

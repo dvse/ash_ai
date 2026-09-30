@@ -182,7 +182,7 @@ defmodule AshAi.MixProject do
 
   defp aliases do
     [
-      "spark.formatter": "spark.formatter --extensions AshAi",
+      "spark.formatter": "spark.formatter --extensions AshAi,AshAi.McpActions",
       sobelow: "sobelow --skip",
       credo: "credo --strict",
       docs: [
