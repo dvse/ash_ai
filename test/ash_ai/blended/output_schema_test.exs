@@ -117,6 +117,8 @@ defmodule AshAi.Blended.OutputSchemaTest do
         "list_comments" => [%{}],
         "stats" => [%{}],
         "stats_no_schema" => [%{}],
+        "stats_hinted" => [%{}],
+        "stats_module_hint" => [%{}],
         "summary" => [%{}],
         "loose_struct" => [%{}],
         "post_record" => [%{}],

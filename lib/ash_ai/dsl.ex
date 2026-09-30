@@ -71,10 +71,11 @@ defmodule AshAi.Dsl do
       doc:
         "Marks tools whose calls may be parked as await continuations. Surfaces as `_meta[\"hyperbob/continuation_target\"]`."
     ],
+    # BLENDED-015: `fun | {module, opts}`, as a generic action's `run`.
     hints: [
-      type: {:fun, 1},
+      type: {:spark_function_behaviour, AshAi.Hints, {AshAi.Hints.Function, 1}},
       doc:
-        "A function receiving the raw action result and returning a model-facing hint string or `nil`. The hint is appended to MCP `tools/call` results as a second text content block; `structuredContent` is unchanged."
+        "A function receiving the raw action result and returning a model-facing hint string or `nil`, or a module implementing `AshAi.Hints` (`module` or `{module, opts}`). The hint is appended to MCP `tools/call` results as a second text content block; `structuredContent` is unchanged."
     ],
     annotations: [
       type: :keyword_list,
@@ -349,11 +350,12 @@ defmodule AshAi.Dsl do
       """
     ],
     schema: [
+      # BLENDED-015: `fun | {module, opts}`, as a generic action's `run`.
       callback: [
-        type: {:fun, 1},
+        type: {:spark_function_behaviour, AshAi.DeliveryHints, {AshAi.DeliveryHints.Function, 1}},
         required: true,
         doc:
-          "Receives `%{tool:, resource:, action:, arguments:, result:}` and returns a list of hint maps or `nil`."
+          "A function receiving `%{tool:, resource:, action:, arguments:, result:}` and returning a list of hint maps or `nil`, or a module implementing `AshAi.DeliveryHints` (`module` or `{module, opts}`)."
       ]
     ]
   }

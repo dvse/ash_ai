@@ -411,6 +411,9 @@ defmodule AshAi.Test.Blended do
     # Generic shapes.
     tool :stats, Post, :stats, hints: &__MODULE__.nil_hint/1
     tool :stats_no_schema, Post, :stats, output_schema?: false
+    # BLENDED-015: the module forms of `hints`.
+    tool :stats_hinted, Post, :stats, hints: {AshAi.Test.Blended.TotalHint, prefix: "Totals"}
+    tool :stats_module_hint, Post, :stats, hints: AshAi.Test.Blended.TotalHint
     tool :summary, Post, :summary, hints: &__MODULE__.non_string_hint/1
     tool :loose_struct, Post, :loose_struct
     tool :post_record, Post, :post_record, load: [:title_bang], hints: &__MODULE__.raising_hint/1
@@ -446,6 +449,8 @@ defmodule AshAi.Test.Blended do
     end
 
     expose Author do
+      # BLENDED-015: the module form of `delivery_hints`.
+      delivery_hints({AshAi.Test.Blended.AuthorDeliveryHints, note: "Write their first post"})
       interface(:author_by_id)
       interface(:author_by_name)
       interface(:rename_author)
@@ -506,4 +511,23 @@ defmodule AshAi.Test.Blended do
   def post_delivery_hints(%{tool: "destroy_post"}), do: :not_a_list
   def post_delivery_hints(%{tool: "get_post"}), do: raise("delivery hints failed")
   def post_delivery_hints(_context), do: nil
+end
+
+defmodule AshAi.Test.Blended.TotalHint do
+  @moduledoc false
+  # BLENDED-015: a result hint as a module, with and without options.
+  use AshAi.Hints
+
+  @impl true
+  def hint(%{total: total}, opts), do: "#{Keyword.get(opts, :prefix, "Total")}: #{total}."
+end
+
+defmodule AshAi.Test.Blended.AuthorDeliveryHints do
+  @moduledoc false
+  # BLENDED-015: delivery hints as a module with options; only `create_author` gets one.
+  use AshAi.DeliveryHints
+
+  @impl true
+  def delivery_hints(%{tool: "create_author"}, opts), do: [%{note: Keyword.fetch!(opts, :note)}]
+  def delivery_hints(_context, _opts), do: nil
 end

@@ -1136,11 +1136,10 @@ defmodule AshAi.Mcp.Server do
   defp put_meta(result, meta), do: Map.put(result, "_meta", meta)
 
   # BLENDED-007: from ash_hyperlang lib/ash_hyperlang/executor.ex:3758 (`result_hint/2`) — the
-  # hint function receives the raw (map) result; only a string hint is kept, and a raising
-  # hint function is ignored.
-  defp result_hint(%Tool{hints: hints}, raw_result)
-       when is_function(hints, 1) and is_map(raw_result) do
-    case hints.(raw_result) do
+  # hint receives the raw (map) result; only a string hint is kept, and a raising hint is
+  # ignored. BLENDED-015: the hint is `{module, opts}` (`AshAi.Hints`).
+  defp result_hint(%Tool{hints: {module, opts}}, raw_result) when is_map(raw_result) do
+    case module.hint(raw_result, opts) do
       hint when is_binary(hint) -> hint
       _other -> nil
     end
@@ -1169,7 +1168,10 @@ defmodule AshAi.Mcp.Server do
       result: raw_result
     }
 
-    case tool.delivery_hints.(context) do
+    # BLENDED-015: the callback is `{module, opts}` (`AshAi.DeliveryHints`).
+    {module, module_opts} = tool.delivery_hints
+
+    case module.delivery_hints(context, module_opts) do
       nil ->
         nil
 

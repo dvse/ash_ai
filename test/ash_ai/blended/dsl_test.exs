@@ -35,7 +35,8 @@ defmodule AshAi.Blended.DslTest do
       assert [%AshAi.Expose{resource: Post} = post, %AshAi.Expose{resource: Author}] =
                AshAi.Info.exposes(Blended)
 
-      assert is_function(post.delivery_hints, 1)
+      assert {AshAi.DeliveryHints.Function, fun: fun} = post.delivery_hints
+      assert is_function(fun, 1)
 
       assert Enum.map(post.interfaces, & &1.name) == [
                :publish_post,
@@ -101,9 +102,12 @@ defmodule AshAi.Blended.DslTest do
 
       assert %Ash.Resource.Actions.Update{name: :publish} = tools.publish_post.action
       assert tools.publish_post.domain == Blended
-      assert tools.publish_post.delivery_hints == (&Blended.post_delivery_hints/1)
-      assert tools.create_post.delivery_hints == (&Blended.post_delivery_hints/1)
-      assert tools.author_by_id.delivery_hints == nil
+      post_hints = {AshAi.DeliveryHints.Function, fun: &Blended.post_delivery_hints/1}
+      assert tools.publish_post.delivery_hints == post_hints
+      assert tools.create_post.delivery_hints == post_hints
+
+      assert tools.author_by_id.delivery_hints ==
+               {AshAi.Test.Blended.AuthorDeliveryHints, note: "Write their first post"}
     end
 
     test "delivery_hints collapses to its callback" do
@@ -125,8 +129,118 @@ defmodule AshAi.Blended.DslTest do
           end
         )
 
-      assert [%AshAi.Expose{delivery_hints: callback}] = AshAi.Info.exposes(domain)
+      assert [%AshAi.Expose{delivery_hints: {AshAi.DeliveryHints.Function, fun: callback}}] =
+               AshAi.Info.exposes(domain)
+
       assert is_function(callback, 1)
+    end
+
+    # BLENDED-015: `fun | {module, opts}`, as Ash's generic action `run`.
+    test "delivery_hints and hints accept a module or {module, opts}" do
+      domain =
+        domain(
+          quote do
+            tools do
+              tool(:widget_totals, AshAi.Blended.DslTest.Widget, :read,
+                hints: AshAi.Test.Blended.TotalHint
+              )
+
+              tool(:widget_labels, AshAi.Blended.DslTest.Widget, :read,
+                hints: {AshAi.Test.Blended.TotalHint, prefix: "Labels"}
+              )
+
+              expose AshAi.Blended.DslTest.Widget do
+                delivery_hints(AshAi.Test.Blended.AuthorDeliveryHints)
+                interface(:list_widgets, hints: fn _result -> "listed" end)
+              end
+            end
+
+            resources do
+              resource AshAi.Blended.DslTest.Widget do
+                define(:list_widgets, action: :read)
+              end
+            end
+          end
+        )
+
+      assert [%AshAi.Expose{delivery_hints: {AshAi.Test.Blended.AuthorDeliveryHints, []}}] =
+               AshAi.Info.exposes(domain)
+
+      tools =
+        Map.new(
+          AshAi.Info.action_tools(domain) ++ AshAi.Info.interface_tools(domain),
+          &{&1.name, &1}
+        )
+
+      assert tools.widget_totals.hints == {AshAi.Test.Blended.TotalHint, []}
+      assert tools.widget_labels.hints == {AshAi.Test.Blended.TotalHint, prefix: "Labels"}
+      assert {AshAi.Hints.Function, fun: hint} = tools.list_widgets.hints
+      assert AshAi.Hints.Function.hint(%{}, fun: hint) == "listed"
+    end
+
+    test "use AshAi.Hints and use AshAi.DeliveryHints declare the behaviours" do
+      # Compiled in the test body so the `__using__` macros run under `:cover`.
+      suffix = System.unique_integer([:positive])
+      hint = Module.concat(__MODULE__, :"Hint#{suffix}")
+      delivery = Module.concat(__MODULE__, :"Delivery#{suffix}")
+
+      Code.compile_quoted(
+        quote do
+          defmodule unquote(hint) do
+            use AshAi.Hints
+            @impl true
+            def hint(result, opts), do: "#{opts[:label]} #{map_size(result)}"
+          end
+
+          defmodule unquote(delivery) do
+            use AshAi.DeliveryHints
+            @impl true
+            def delivery_hints(context, opts), do: [%{note: "#{opts[:label]} #{context.tool}"}]
+          end
+        end
+      )
+
+      behaviours = &List.flatten(Keyword.get_values(&1.module_info(:attributes), :behaviour))
+      assert AshAi.Hints in behaviours.(hint)
+      assert AshAi.DeliveryHints in behaviours.(delivery)
+
+      assert hint.hint(%{a: 1}, label: "size") == "size 1"
+      assert delivery.delivery_hints(%{tool: "t"}, label: "after") == [%{note: "after t"}]
+    end
+
+    test "hints and delivery_hints refuse a value that is neither a function nor a module" do
+      assert_raise Spark.Error.DslError, ~r/hints/, fn ->
+        domain(
+          quote do
+            tools do
+              tool(:widget_totals, AshAi.Blended.DslTest.Widget, :read, hints: "not a hint")
+            end
+
+            resources do
+              resource AshAi.Blended.DslTest.Widget
+            end
+          end
+        )
+      end
+
+      assert_raise Spark.Error.DslError, ~r/callback/, fn ->
+        domain(
+          quote do
+            tools do
+              expose AshAi.Blended.DslTest.Widget do
+                delivery_hints(fn _one, _two -> nil end)
+                interface(:list_widgets)
+              end
+            end
+
+            resources do
+              resource AshAi.Blended.DslTest.Widget do
+                define(:list_widgets, action: :read)
+              end
+            end
+          end
+        )
+      end
     end
 
     test "expose is rejected inside a resource" do

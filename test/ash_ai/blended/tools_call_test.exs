@@ -57,6 +57,24 @@ defmodule AshAi.Blended.ToolsCallTest do
     end
   end
 
+  describe "BLENDED-015 hints and delivery hints as modules" do
+    test "a hints module, with or without options, appends its text" do
+      assert %{"content" => [_json, %{"type" => "text", "text" => "Totals: 3."}]} =
+               call(@opts, "stats_hinted", %{})
+
+      assert %{"content" => [_json, %{"type" => "text", "text" => "Total: 3."}]} =
+               call(@opts, "stats_module_hint", %{})
+    end
+
+    test "a delivery_hints module receives its options" do
+      result = call(@opts, "create_author", %{"input" => %{"name" => "Zed"}})
+      assert result["_meta"]["hyperbob/delivery_hints"] == [%{"note" => "Write their first post"}]
+
+      author = Ash.create!(AshAi.Test.Blended.Author, %{name: "Yan"}, authorize?: false)
+      refute Map.has_key?(call(@opts, "author_by_id", %{"id" => author.id}), "_meta")
+    end
+  end
+
   describe "BLENDED-008 delivery hints" do
     test "hint maps render as calls to exposed tools, else as notes" do
       result = call(@opts, "create_post", %{"input" => %{"title" => "Fresh"}})

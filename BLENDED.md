@@ -21,14 +21,15 @@ Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`
 | BLENDED-004 | `refine?` option (default true) | `false` omits the read query envelope (filter/sort/limit/offset/result_type). Equivalent to upstream `action_parameters: []`; both are accepted and must agree. | hyperlang `refine?` |
 | BLENDED-005 | `blocking?` option | Default comes from the action's own `metadata :blocking?` declaration (or `:await`). An explicit option overrides. Surfaces as `_meta["hyperbob/blocking"]` and in the description. | hyperlang `surface.ex` `blocking?/3`, `blocking_action?/2` |
 | BLENDED-006 | `continuation_target?` option (default false) | Marks tools whose calls may park as await continuations. Metadata only. | hyperlang `continuation_target` |
-| BLENDED-007 | `hints` option, a `fn result -> String.t() | nil` | Its text is appended as a second text `content` block (model-facing). `structuredContent` is unchanged. | hyperlang `hints`, executor `result_hints_doc` |
-| BLENDED-008 | `delivery_hints` entity on `expose` | A per-resource callback returning a list of hint maps, attached to results for that resource. | hyperlang `@delivery_hints` |
+| BLENDED-007 | `hints` option, a `fn result -> String.t() | nil` (or a module, BLENDED-015) | Its text is appended as a second text `content` block (model-facing). `structuredContent` is unchanged. | hyperlang `hints`, executor `result_hints_doc` |
+| BLENDED-008 | `delivery_hints` entity on `expose` | A per-resource callback (or a module, BLENDED-015) returning a list of hint maps, attached to results for that resource. | hyperlang `@delivery_hints` |
 | BLENDED-009 | `annotations` option (on `tool` and `interface`) | `title`, `read_only?`, `destructive?`, `idempotent?`, `open_world?`. Defaults from the action type: read → read_only true, destructive false; create → false/false; update/destroy → false/true; generic → from `metadata :read_only?`/`:destructive?` if declared, else read_only false, destructive true. `open_world?` defaults false. | MCP spec `ToolAnnotations`; carrier pattern from hyperlang `blocking?` (action metadata) |
 | BLENDED-010 | `output_schema?` option (default true when the result is a map) | Emits MCP `outputSchema` from `Ash.Info.Manifest` (generic `returns`; read/create/update results as the resource's public fields honouring `select`/`load`). It must describe exactly what `structuredContent` returns. | hyperlang documents outputs via `Ash.Info.Manifest` `ActionBuilder` `returns`; MCP spec `outputSchema` |
 | BLENDED-011 | Zero-input tools | When no input is required, the input schema requires nothing and `{}` is accepted (ChatGPT entrypoints need this). | hyperlang `Capability.required_arguments?`, arity-0 imports |
 | BLENDED-012 | `forbidden_fields` option on the MCP server/`tools` section (`:hide` default, `:display`) | How field-policy-forbidden fields appear in results. `outputSchema` must agree. | hyperlang `eval_actions forbidden_fields` |
 | BLENDED-013 | Policy breakdown on forbidden calls | The full Ash policy report is logged host-side; the caller gets a compact `isError` text with the tool name and a stable category. When the actor is nil, add `_meta["mcp/www_authenticate"]`. | hyperlang `EvalActions.PolicyBreakdown`, `GuestError.policy_denial` |
 | BLENDED-014 | `AshAi.McpActions` resource extension (`mcp_actions` section) | Synthesizes one public generic action (default `:mcp`, argument `request: :map`, returns `%{status, headers, body}`) whose run builds the request as an in-memory `Plug.Conn` and calls `AshAi.Mcp.Server.handle_post/4` with the action's actor/tenant/context and the section's server options (`otp_app`, `tools`, `actions`, `mcp_resources`, `exclude_actions`, `forbidden_fields`, `strict`, `mcp_name`, `mcp_server_version`, `instructions`, `protocol_version_statement`, `list_ttl_ms`, `read_ttl_ms`, `cache_scope`, `resource_metadata_url`). A host that already exposes resource actions (Hyperbob's publication gateway) publishes an MCP endpoint as that one action. | hyperlang `AshHyperlang.EvalActions` (section, `Transformers.AddActions`, `Run.*`) |
+| BLENDED-015 | Module form of `hints` and `delivery_hints` | Both options accept `fun | module | {module, opts}`, Ash's `{:spark_function_behaviour, Behaviour, {FunctionModule, arity}}` idiom, as a generic action's `run` is typed (`Ash.Resource.Actions.Action` `run:` with `Ash.Resource.Actions.Implementation` and `Ash.Resource.Action.ImplementationFunction`). Behaviours: `AshAi.Hints` (`hint(result, opts) :: String.t() | nil`) and `AshAi.DeliveryHints` (`delivery_hints(context, opts) :: [map()] | nil`); a function is stored as `{AshAi.Hints.Function, fun: fun}` / `{AshAi.DeliveryHints.Function, fun: fun}`. A declaration that cannot hold a function (Bobstack's type-level Island declaration) names a module. | Ash `run` option (`lib/ash/resource/actions/action/action.ex`, `implementation_function.ex`) |
 
 ## MCP server output (`AshAi.Mcp.Server`)
 
@@ -103,6 +104,13 @@ Details the table above leaves open, resolved while implementing this branch.
   `resource_metadata="<url>"` when the server has a `resource_metadata_url` option. Tools that
   upstream's permission pre-check already hides stay hidden (`Tool not found`).
 
+- **BLENDED-015** — the stored value is always `{module, opts}` (Spark normalizes the three
+  spellings); the MCP server calls `module.hint(result, opts)` and
+  `module.delivery_hints(context, opts)`. Everything BLENDED-007/008 say about the function form
+  (map results only, string hints only, raise/throw ignored; `nil`, non-list and raising
+  callbacks) holds for a module unchanged. An MFA is not accepted, as Spark's
+  `spark_function_behaviour` does not accept one.
+
 - **BLENDED-014** — `request` is `%{body, headers, server_url}` (string or atom keys). `body` is
   the JSON-RPC message as `Plug.Parsers` would leave it (decoded JSON), or raw text, which the
   server parses (`-32700` on bad JSON). `headers` maps lower-case names to a string or a list
@@ -130,6 +138,8 @@ pass. The Bobstack port's parity rows are these tests plus upstream's.
   every result shape, validating the text content against `result_for_tool/1` and
   `structuredContent` against `outputSchema` with `JsonXema` (already a dependency through
   `ash_json_api`).
+- `test/ash_ai/blended/dsl_test.exs` and `tools_call_test.exs` — BLENDED-015 (the three spellings
+  of `hints` and `delivery_hints`, the refusals, the behaviours, and the module forms over MCP).
 - `test/ash_ai/blended/mcp_action_test.exs` — BLENDED-014: the synthesized action (public,
   argument and return), `initialize`/`tools/list`/`tools/call`/`resources/read`/2026-07-28
   requests through `Ash.run_action/2`, the action's actor reaching tools, tool and action
