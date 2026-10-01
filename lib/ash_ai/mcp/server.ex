@@ -745,7 +745,9 @@ defmodule AshAi.Mcp.Server do
         protocol_version_statement =
           opts[:protocol_version_statement] ||
             if(requested_version in @initialize_based_versions, do: requested_version) ||
-            "2025-03-26"
+            # BLENDED-019: an unsupported request is answered with the latest supported
+            # initialize-based revision (MCP 2025-11-25 lifecycle, "Version Negotiation").
+            hd(@initialize_based_versions)
 
         capabilities = capabilities(opts, params["capabilities"] || %{})
 

@@ -481,7 +481,8 @@ defmodule AshAi.Mcp.Protocol20260728Test do
         })
 
       response = Router.call(conn, @tool_opts)
-      assert Jason.decode!(response.resp_body)["result"]["protocolVersion"] == "2025-03-26"
+      # BLENDED-019: the latest supported initialize-based revision, not the oldest.
+      assert Jason.decode!(response.resp_body)["result"]["protocolVersion"] == "2025-06-18"
     end
   end
 

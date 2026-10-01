@@ -74,7 +74,7 @@ defmodule AshAi.Blended.McpActionTest do
                "id" => 1,
                "result" => %{
                  "serverInfo" => %{"name" => "notes", "version" => "1.2.3"},
-                 "protocolVersion" => "2025-03-26",
+                 "protocolVersion" => "2025-06-18",
                  "instructions" => "Use the notes tools.",
                  "capabilities" => %{"tools" => %{}, "resources" => %{}}
                }
