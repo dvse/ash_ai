@@ -32,6 +32,7 @@ defmodule AshAi.McpActions.Run.Mcp do
       )
       |> put_server_url(field(request, :server_url))
       |> put_files(field(request, :files))
+      |> put_security_schemes(field(request, :security_schemes))
 
     conn = Server.handle_post(conn, field(request, :body), session_id(conn), opts)
 
@@ -47,6 +48,13 @@ defmodule AshAi.McpActions.Run.Mcp do
     do: Keyword.update(opts, :context, %{mcp_files: files}, &Map.put(&1, :mcp_files, files))
 
   defp put_files(opts, _files), do: opts
+
+  # BLENDED-016: the host that authenticates the endpoint states its schemes per request, as it
+  # states `server_url`; they replace the section's default for tools that declare none.
+  defp put_security_schemes(opts, schemes) when is_list(schemes),
+    do: Keyword.put(opts, :security_schemes, schemes)
+
+  defp put_security_schemes(opts, _schemes), do: opts
 
   # As `AshAi.Mcp.Router.get_session_id/1`
   defp session_id(conn) do

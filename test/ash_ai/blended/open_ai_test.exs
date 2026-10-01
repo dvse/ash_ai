@@ -68,6 +68,16 @@ defmodule AshAi.Blended.OpenAiTest do
       refute Map.has_key?(tool, "_meta")
     end
 
+    test "the request's schemes replace the section's default" do
+      %{"result" => %{"tools" => tools}} =
+        rpc("tools/list", %{}, security_schemes: [%{"type" => "noauth"}])
+
+      ping = Enum.find(tools, &(&1["name"] == "ping"))
+      assert ping["securitySchemes"] == [%{"type" => "noauth"}]
+      attach = Enum.find(tools, &(&1["name"] == "attach_document"))
+      assert attach["securitySchemes"] == [%{"type" => "oauth2", "scopes" => ["mcp"]}]
+    end
+
     test "an unknown scheme is refused" do
       assert_raise ArgumentError, ~r/a security scheme is/, fn ->
         tools_without_endpoint([:bad_scheme])
@@ -175,7 +185,9 @@ defmodule AshAi.Blended.OpenAiTest do
           %{
             "name" => "attach_document",
             "arguments" => %{"input" => %{"id" => "d1"}, "file" => @a}
-          }, files: files)
+          },
+          files: files
+        )
 
       assert result["structuredContent"]["mcp_files"] == 1
 
@@ -228,6 +240,12 @@ defmodule AshAi.Blended.OpenAiTest do
         "headers" => %{}
       }
       |> then(&if(opts[:files], do: Map.put(&1, "files", opts[:files]), else: &1))
+      |> then(
+        &if(opts[:security_schemes],
+          do: Map.put(&1, "security_schemes", opts[:security_schemes]),
+          else: &1
+        )
+      )
 
     {:ok, %{status: 200, body: body}} =
       Endpoint
