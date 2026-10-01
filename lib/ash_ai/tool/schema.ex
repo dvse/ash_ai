@@ -38,6 +38,8 @@ defmodule AshAi.Tool.Schema do
       get_by: get_by,
       full_filter_schema?: Map.get(tool, :full_filter_schema?, false)
     )
+    # BLENDED-018: file fields leave the `input` envelope (OpenAI Apps SDK `openai/fileParams`).
+    |> AshAi.Tool.OpenAi.hoist_schema(tool, strict?)
   end
 
   @doc """

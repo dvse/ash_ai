@@ -105,6 +105,8 @@ defmodule AshAi.Info do
       hints: exposed.hints,
       annotations: exposed.annotations,
       output_schema?: exposed.output_schema?,
+      security_schemes: exposed.security_schemes,
+      file_params: exposed.file_params,
       load: [],
       async: true,
       arguments: [],

@@ -742,11 +742,11 @@ defmodule AshAi.Mcp.Server do
 
         requested_version = params["protocolVersion"]
 
+        # BLENDED-019: an unsupported request is answered with the latest supported
+        # initialize-based revision (MCP 2025-11-25 lifecycle, "Version Negotiation").
         protocol_version_statement =
           opts[:protocol_version_statement] ||
             if(requested_version in @initialize_based_versions, do: requested_version) ||
-            # BLENDED-019: an unsupported request is answered with the latest supported
-            # initialize-based revision (MCP 2025-11-25 lifecycle, "Version Negotiation").
             hd(@initialize_based_versions)
 
         capabilities = capabilities(opts, params["capabilities"] || %{})
@@ -1008,7 +1008,8 @@ defmodule AshAi.Mcp.Server do
         "annotations" => annotations_to_map(Tool.annotations(tool))
       }
       |> put_if("outputSchema", AshAi.Tool.Schema.output_for_tool(tool))
-      |> put_meta(Tool.meta(tool))
+      |> put_meta(Map.merge(Tool.meta(tool), AshAi.Tool.OpenAi.file_params_meta(tool)))
+      |> put_security_schemes(AshAi.Tool.OpenAi.security_schemes(tool, opts[:security_schemes]))
     end)
     |> Enum.sort_by(& &1["name"])
   end
@@ -1035,10 +1036,12 @@ defmodule AshAi.Mcp.Server do
       %Tool{} = tool ->
         context = tool_context(opts)
 
-        case transform_tool_arguments(tool, tool_args, context, opts) do
-          {:ok, transformed_args} ->
-            execute_resolved_tool(tool, transformed_args, context, opts)
-
+        with {:ok, transformed_args} <- transform_tool_arguments(tool, tool_args, context, opts),
+             # BLENDED-018: file fields go back into the action input.
+             {:ok, transformed_args} <-
+               AshAi.Tool.OpenAi.reconstruct_arguments(tool, transformed_args) do
+          execute_resolved_tool(tool, transformed_args, context, opts)
+        else
           {:error, error_text} ->
             {:ok, tool_error_result(error_text)}
         end
@@ -1132,6 +1135,20 @@ defmodule AshAi.Mcp.Server do
       "openWorldHint" => annotations.open_world?
     }
     |> put_if("title", annotations.title)
+  end
+
+  # BLENDED-016: the Apps SDK reads `securitySchemes` from the descriptor and, for older
+  # clients, its `_meta` mirror.
+  defp put_security_schemes(definition, nil), do: definition
+
+  defp put_security_schemes(definition, schemes) do
+    definition
+    |> Map.put("securitySchemes", schemes)
+    |> Map.update(
+      "_meta",
+      %{"securitySchemes" => schemes},
+      &Map.put(&1, "securitySchemes", schemes)
+    )
   end
 
   defp put_meta(result, meta) when meta == %{}, do: result

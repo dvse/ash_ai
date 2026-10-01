@@ -76,6 +76,11 @@ defmodule AshAi.McpActions do
         type: :string,
         doc:
           "OAuth protected-resource metadata URL named in `mcp/www_authenticate` (BLENDED-013)."
+      ],
+      security_schemes: [
+        type: {:list, :map},
+        doc:
+          "Default `securitySchemes` of every tool that declares none (BLENDED-016; the router's `security_schemes` option)."
       ]
     ],
     entities: []

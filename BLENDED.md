@@ -30,6 +30,8 @@ Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`
 | BLENDED-013 | Policy breakdown on forbidden calls | The full Ash policy report is logged host-side; the caller gets a compact `isError` text with the tool name and a stable category. When the actor is nil, add `_meta["mcp/www_authenticate"]`. | hyperlang `EvalActions.PolicyBreakdown`, `GuestError.policy_denial` |
 | BLENDED-014 | `AshAi.McpActions` resource extension (`mcp_actions` section) | Synthesizes one public generic action (default `:mcp`, argument `request: :map`, returns `%{status, headers, body}`) whose run builds the request as an in-memory `Plug.Conn` and calls `AshAi.Mcp.Server.handle_post/4` with the action's actor/tenant/context and the section's server options (`otp_app`, `tools`, `actions`, `mcp_resources`, `exclude_actions`, `forbidden_fields`, `strict`, `mcp_name`, `mcp_server_version`, `instructions`, `protocol_version_statement`, `list_ttl_ms`, `read_ttl_ms`, `cache_scope`, `resource_metadata_url`). A host that already exposes resource actions (Hyperbob's publication gateway) publishes an MCP endpoint as that one action. | hyperlang `AshHyperlang.EvalActions` (section, `Transformers.AddActions`, `Run.*`) |
 | BLENDED-015 | Module form of `hints` and `delivery_hints` | Both options accept `fun | module | {module, opts}`, Ash's `{:spark_function_behaviour, Behaviour, {FunctionModule, arity}}` idiom, as a generic action's `run` is typed (`Ash.Resource.Actions.Action` `run:` with `Ash.Resource.Actions.Implementation` and `Ash.Resource.Action.ImplementationFunction`). Behaviours: `AshAi.Hints` (`hint(result, opts) :: String.t() | nil`) and `AshAi.DeliveryHints` (`delivery_hints(context, opts) :: [map()] | nil`); a function is stored as `{AshAi.Hints.Function, fun: fun}` / `{AshAi.DeliveryHints.Function, fun: fun}`. A declaration that cannot hold a function (Bobstack's type-level Island declaration) names a module. | Ash `run` option (`lib/ash/resource/actions/action/action.ex`, `implementation_function.ex`) |
+| BLENDED-016 | `security_schemes` option (on `tool` and `interface`; default from the MCP server's / `mcp_actions` section's `security_schemes` option) | A list of `%{type: "noauth"}` or `%{type: "oauth2", scopes: [String.t()]}` (atom or string keys). `tools/list` emits it as the tool's top-level `securitySchemes` and mirrors it in `_meta["securitySchemes"]`. Unset everywhere, nothing is emitted. Any other shape raises `ArgumentError` naming the tool. Declarative only; the host enforces authentication. | OpenAI Apps SDK reference, "Tool descriptor parameters" (`securitySchemes`, `_meta` back-compat mirror); developers.openai.com/plugins/build/auth "Triggering authentication UI" |
+| BLENDED-018 | `file_params` option (on `tool` and `interface`) | Names public action arguments of type `:map` or `{:array, :map}` that take files in the Apps SDK shape `{download_url, file_id, mime_type?, file_name?}`. Each leaves the `input` envelope and becomes a top-level `inputSchema` property with exactly the SDK's file object schema (or `{type: array, items: <it>}`), required at the top level when the argument is not nullable; `_meta["openai/fileParams"]` lists the names. On `tools/call`, each file field's value is checked for that shape (an array: 1 to 20 objects) and put back into the action input; a bad value is a tool error naming the field and the action does not run. `AshAi.McpActions`' `request` may carry `files` (a list), which the action receives as `context.mcp_files`. | OpenAI Apps SDK reference, "File APIs" (`openai/fileParams`, file schema, multiple files, runtime shape) |
 | BLENDED-019 | `initialize` version negotiation | A requested initialize-based revision that is supported is echoed; any other request is answered with the **latest** supported initialize-based revision (`2025-06-18`), not the oldest. **Upstream fix**: upstream answered `2025-03-26`; `protocol_2026_07_28_test.exs` ("initialize downgrades unsupported requested versions") and `mcp_action_test.exs` (an `initialize` without a version) now expect `2025-06-18`. | MCP 2025-11-25 lifecycle, "Version Negotiation" |
 
 ## MCP server output (`AshAi.Mcp.Server`)
@@ -126,6 +128,14 @@ Details the table above leaves open, resolved while implementing this branch.
   permission pre-check. OAuth bearer tokens would be verified by the host, which then invokes
   the action as the token's actor; nothing in the action changes.
 
+- **BLENDED-016/018/019** — `AshAi.Tool.OpenAi` (`lib/ash_ai/tool/open_ai.ex`) holds the
+  descriptor rules. `securitySchemes` is not part of `tools/call` results. With strict schemas
+  (the ReqLLM path), a nullable file field is `anyOf [<schema>, null]` and every top-level field is
+  required, as strict mode does everywhere. When every action argument is a file field, the
+  `input` envelope is omitted (BLENDED-011). The reconstruction runs after
+  `tool_argument_transformer`. There is no `Ash.Type.File`: file fields are maps the application
+  resolves; `context.mcp_files` is caller-supplied request data, never authority.
+
 ## Tests (the oracle)
 
 Every BLENDED row has ExUnit coverage beside the upstream tests, and all upstream tests still
@@ -145,6 +155,8 @@ pass. The Bobstack port's parity rows are these tests plus upstream's.
   argument and return), `initialize`/`tools/list`/`tools/call`/`resources/read`/2026-07-28
   requests through `Ash.run_action/2`, the action's actor reaching tools, tool and action
   policy denials, and the in-memory conn. Support: `test/support/mcp_actions.ex`.
+- `test/ash_ai/blended/open_ai_test.exs` — BLENDED-016, 018 (single and array file fields) and
+  019. Support: `test/support/open_ai.ex`.
 - `test/COVERAGE.md` — per-module coverage before and after, and the new-line coverage check.
 
 ## Upstreaming

@@ -31,6 +31,7 @@ defmodule AshAi.McpActions.Run.Mcp do
         context: Map.get(context, :source_context) || %{}
       )
       |> put_server_url(field(request, :server_url))
+      |> put_files(field(request, :files))
 
     conn = Server.handle_post(conn, field(request, :body), session_id(conn), opts)
 
@@ -39,6 +40,13 @@ defmodule AshAi.McpActions.Run.Mcp do
 
   defp put_server_url(opts, nil), do: opts
   defp put_server_url(opts, server_url), do: Keyword.put(opts, :server_url, server_url)
+
+  # BLENDED-018: file bytes the host fetched for this request reach the tools' actions as
+  # `context.mcp_files`. They are the caller's request data, never authority.
+  defp put_files(opts, files) when is_list(files),
+    do: Keyword.update(opts, :context, %{mcp_files: files}, &Map.put(&1, :mcp_files, files))
+
+  defp put_files(opts, _files), do: opts
 
   # As `AshAi.Mcp.Router.get_session_id/1`
   defp session_id(conn) do

@@ -47,6 +47,9 @@ defmodule AshAi do
       :delivery_hints,
       :forbidden_fields,
       :interface,
+      # BLENDED-016/018 (see BLENDED.md)
+      :security_schemes,
+      file_params: [],
       refine?: true,
       continuation_target?: false,
       annotations: [],
@@ -399,6 +402,8 @@ defmodule AshAi do
         :blocking?,
         :hints,
         :__identifier__,
+        :security_schemes,
+        file_params: [],
         refine?: true,
         continuation_target?: false,
         annotations: [],

@@ -100,6 +100,19 @@ defmodule AshAi.Dsl do
       default: true,
       doc:
         "Whether to emit an MCP `outputSchema`. Only emitted when every result the tool can return is a JSON object (i.e. always carried as `structuredContent`)."
+    ],
+    # BLENDED-016: OpenAI Apps SDK tool descriptor `securitySchemes`
+    security_schemes: [
+      type: {:list, :map},
+      doc:
+        "The tool's authentication schemes, as the OpenAI Apps SDK declares them: `%{type: \"noauth\"}` or `%{type: \"oauth2\", scopes: [\"...\"]}` (atom or string keys). Emitted as the tool's `securitySchemes` and mirrored in `_meta[\"securitySchemes\"]`. Unset, the MCP server's `security_schemes` option applies; when that is unset too, nothing is emitted. Declarative only: the host enforces authentication."
+    ],
+    # BLENDED-018: OpenAI Apps SDK `_meta["openai/fileParams"]`
+    file_params: [
+      type: {:list, :atom},
+      default: [],
+      doc:
+        "Public action arguments of type `:map` or `{:array, :map}` that take files in the OpenAI Apps SDK shape `{download_url, file_id, mime_type, file_name}`. Each leaves the `input` envelope and becomes a top-level property with that exact schema (or an array of it), the tool's `_meta[\"openai/fileParams\"]` names them, and a call's values are checked for that shape and put back into the action input."
     ]
   ]
 
