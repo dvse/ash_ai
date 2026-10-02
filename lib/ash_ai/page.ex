@@ -165,7 +165,7 @@ defmodule AshAi.Page do
   @doc "The tool name of a page action."
   def tool_name(resource, action) do
     short = resource |> Module.split() |> List.last() |> Macro.underscore()
-    String.to_atom("#{short}_#{action}")
+    String.to_atom("#{short}_#{Macro.underscore(to_string(action))}")
   end
 
   @doc "The tool name of a page's open tool."
