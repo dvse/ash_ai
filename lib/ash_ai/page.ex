@@ -280,11 +280,13 @@ defmodule AshAi.Page do
   def hidden_inputs(_tool, _view), do: []
 
   @doc """
-  Runs a page tool through the framework when it runs its own actions (`c:run/4`): `{:ok, result}`
-  with the tool result, or `:default` for upstream's execution.
+  Runs a page action's tool through the framework when it runs its own actions (`c:run/4`):
+  `{:ok, result}` with the tool result, or `:default` for upstream's execution (any other tool of
+  the view, such as the author's linked tool, always runs as upstream).
   """
   def run(%AshAi.Tool{} = tool, call, view, tool_arguments) do
-    if function_exported?(call.adapter, :run, 4) do
+    if function_exported?(call.adapter, :run, 4) and
+         {tool.resource, tool.action.name} in call.adapter.actions(view.page) do
       action = %{resource: tool.resource, action: tool.action.name, arguments: call.arguments}
 
       case call.adapter.run(

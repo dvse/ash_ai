@@ -260,6 +260,7 @@ defmodule AshAi.Test.Page do
   tools do
     tool :show_counter, Item, :read, ui: :counter
     tool :list_items, Item, :read
+    tool :show_guarded, Item, :read, ui: :guarded
   end
 
   mcp_resources do

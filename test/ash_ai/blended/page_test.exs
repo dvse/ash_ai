@@ -211,6 +211,13 @@ defmodule AshAi.Blended.PageTest do
       assert refused["isError"]
       assert refused["_meta"]["ash_ai/page"]["errors"] == ["the page refused the bump"]
       assert refused["_meta"]["ash_ai/page"]["html"] == "count=3"
+
+      Ash.create!(Item, %{label: "one"})
+      linked = call("show_guarded", %{}, @alice)
+      refute linked["isError"]
+      assert [%{"text" => text}] = linked["content"]
+      assert text =~ ~s("label":"one")
+      assert linked["_meta"]["ash_ai/page"]["html"] == "count=3"
     end
 
     test "tools that are not the view's carry no page" do
@@ -236,7 +243,7 @@ defmodule AshAi.Blended.PageTest do
           [
             otp_app: :ash_ai,
             actions: [{Item, :*}],
-            tools: [:show_counter, :list_items],
+            tools: [:show_counter, :list_items, :show_guarded],
             mcp_resources: [:counter, :static, :guarded]
           ],
           opts
