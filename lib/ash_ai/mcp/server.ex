@@ -1065,7 +1065,10 @@ defmodule AshAi.Mcp.Server do
               {:ok, tool_error_result(text)}
 
             true ->
-              execute_found_tool(tool, call.arguments, call.context, opts)
+              case AshAi.Page.run(tool, call, view, tool_args) do
+                {:ok, result} -> {:ok, result}
+                :default -> execute_found_tool(tool, call.arguments, call.context, opts)
+              end
           end
 
         errors =

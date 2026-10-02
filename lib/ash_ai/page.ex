@@ -97,7 +97,17 @@ defmodule AshAi.Page do
   @callback mount(page :: module(), session_id :: String.t(), scope()) ::
               :ok | {:error, String.t()}
 
-  @optional_callbacks mount: 3
+  @doc """
+  Run a page action for a session, as the framework's own dispatch does (optional). A framework
+  whose page rows are reachable only through its dispatch boundary (a session key the caller may
+  not filter by) answers here; one that leaves page actions to ordinary tool execution leaves it
+  out. `call` names the tool's `resource`, `action` and its `arguments` (upstream's tool argument
+  shape: `"input"` and top-level identity values). `:ok` or `{:error, text}`.
+  """
+  @callback run(page :: module(), session_id :: String.t(), call :: map(), scope()) ::
+              :ok | {:error, String.t()}
+
+  @optional_callbacks mount: 3, run: 4
 
   @meta_key "ash_ai/page"
   @visibility_app %{"visibility" => ["app"]}
@@ -268,6 +278,31 @@ defmodule AshAi.Page do
   end
 
   def hidden_inputs(_tool, _view), do: []
+
+  @doc """
+  Runs a page tool through the framework when it runs its own actions (`c:run/4`): `{:ok, result}`
+  with the tool result, or `:default` for upstream's execution.
+  """
+  def run(%AshAi.Tool{} = tool, call, view, tool_arguments) do
+    if function_exported?(call.adapter, :run, 4) do
+      action = %{resource: tool.resource, action: tool.action.name, arguments: call.arguments}
+
+      case call.adapter.run(
+             view.page,
+             call.session,
+             action,
+             scope(call, view, tool_arguments, [])
+           ) do
+        :ok ->
+          {:ok, %{"isError" => false, "content" => [%{"type" => "text", "text" => "Done."}]}}
+
+        {:error, text} ->
+          {:ok, %{"isError" => true, "content" => [%{"type" => "text", "text" => text}]}}
+      end
+    else
+      :default
+    end
+  end
 
   @doc """
   Mounts the caller's page row before an action on the page resource runs, so a page action

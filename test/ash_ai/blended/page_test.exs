@@ -10,13 +10,16 @@ defmodule AshAi.Blended.PageTest do
   """
   use ExUnit.Case, async: false
 
-  alias AshAi.Test.Page.{CounterPage, Item}
+  alias AshAi.Test.Page.{CounterPage, GuardedPage, Item}
 
   @alice %{id: "alice", name: "Alice"}
   @bob %{id: "bob", name: "Bob"}
 
   setup do
-    for resource <- [CounterPage, Item], record <- Ash.read!(resource), do: Ash.destroy!(record)
+    for resource <- [CounterPage, Item, GuardedPage],
+        record <- Ash.read!(resource),
+        do: Ash.destroy!(record)
+
     :ok
   end
 
@@ -190,6 +193,18 @@ defmodule AshAi.Blended.PageTest do
       refute result["_meta"]
     end
 
+    test "a framework that runs its own actions answers its page's tools" do
+      result = call("guarded_page_bump", %{"input" => %{"count" => 3}}, @alice)
+      refute result["isError"]
+      assert result["content"] == [%{"type" => "text", "text" => "Done."}]
+      assert result["_meta"]["ash_ai/page"]["html"] == "count=3"
+
+      refused = call("guarded_page_bump", %{"input" => %{"count" => -1}}, @alice)
+      assert refused["isError"]
+      assert refused["_meta"]["ash_ai/page"]["errors"] == ["the page refused the bump"]
+      assert refused["_meta"]["ash_ai/page"]["html"] == "count=3"
+    end
+
     test "tools that are not the view's carry no page" do
       result = call("list_items", %{}, @alice)
       refute result["_meta"]["ash_ai/page"]
@@ -214,7 +229,7 @@ defmodule AshAi.Blended.PageTest do
             otp_app: :ash_ai,
             actions: [{Item, :*}],
             tools: [:show_counter, :list_items],
-            mcp_resources: [:counter, :static]
+            mcp_resources: [:counter, :static, :guarded]
           ],
           opts
         )

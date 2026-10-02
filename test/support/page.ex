@@ -165,6 +165,86 @@ defmodule AshAi.Test.Page.Adapter do
   end
 end
 
+defmodule AshAi.Test.Page.RunFramework do
+  @moduledoc false
+  use Spark.Dsl.Extension, sections: []
+
+  def mcp_page_adapter, do: AshAi.Test.Page.RunAdapter
+end
+
+defmodule AshAi.Test.Page.GuardedPage do
+  @moduledoc false
+  use Ash.Resource,
+    domain: AshAi.Test.Page,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshAi.Test.Page.RunFramework]
+
+  ets do
+    private? false
+  end
+
+  attributes do
+    attribute :session_id, :string, primary_key?: true, allow_nil?: false, public?: true
+    attribute :count, :integer, default: 0, public?: true
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :mount do
+      accept [:session_id]
+    end
+
+    update :bump do
+      accept [:count]
+    end
+  end
+end
+
+defmodule AshAi.Test.Page.RunAdapter do
+  @moduledoc false
+  # A framework whose page rows are reachable only through its own dispatch: it runs the page's
+  # actions itself (`c:AshAi.Page.run/4`).
+  @behaviour AshAi.Page
+
+  alias AshAi.Test.Page.GuardedPage
+
+  @impl true
+  def document(_page, _info), do: {:ok, "<!doctype html><main>guarded</main>"}
+
+  @impl true
+  def actions(GuardedPage), do: [{GuardedPage, :bump}]
+
+  @impl true
+  def session(_page, _session_id), do: %{context: %{}, inputs: %{}}
+
+  @impl true
+  def run(GuardedPage, session_id, %{action: :bump, arguments: arguments}, _scope) do
+    by = get_in(arguments, ["input", "count"]) || 1
+
+    if by < 0 do
+      {:error, "the page refused the bump"}
+    else
+      row = row(session_id)
+      row |> Ash.Changeset.for_update(:bump, %{count: row.count + by}) |> Ash.update!()
+      :ok
+    end
+  end
+
+  @impl true
+  def render(_page, session_id, scope) do
+    {:ok,
+     %{"html" => "count=#{row(session_id).count}", "errors" => scope.errors, "bindings" => %{}}}
+  end
+
+  defp row(session_id) do
+    case Ash.get(GuardedPage, session_id) do
+      {:ok, row} -> row
+      _missing -> Ash.create!(GuardedPage, %{session_id: session_id}, action: :mount)
+    end
+  end
+end
+
 defmodule AshAi.Test.Page do
   @moduledoc false
   use Ash.Domain, otp_app: :ash_ai, extensions: [AshAi], validate_config_inclusion?: false
@@ -174,6 +254,7 @@ defmodule AshAi.Test.Page do
   resources do
     resource CounterPage
     resource Item
+    resource AshAi.Test.Page.GuardedPage
   end
 
   tools do
@@ -184,5 +265,6 @@ defmodule AshAi.Test.Page do
   mcp_resources do
     mcp_ui_resource :counter, "ui://counter/view", page: CounterPage, title: "Counter"
     mcp_ui_resource :static, "ui://static/view.html", html_path: "test/support/page.ex"
+    mcp_ui_resource :guarded, "ui://guarded/view", page: AshAi.Test.Page.GuardedPage
   end
 end
