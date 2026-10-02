@@ -33,6 +33,8 @@ Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`
 | BLENDED-016 | `security_schemes` option (on `tool` and `interface`; default from the MCP server's / `mcp_actions` section's `security_schemes` option) | A list of `%{type: "noauth"}` or `%{type: "oauth2", scopes: [String.t()]}` (atom or string keys). `tools/list` emits it as the tool's top-level `securitySchemes` and mirrors it in `_meta["securitySchemes"]`. Unset everywhere, nothing is emitted. `AshAi.McpActions`' `request` may carry `security_schemes`: the host that authenticates the endpoint states them per request, as it states `server_url`, and they replace the section's default. Any other shape raises `ArgumentError` naming the tool. Declarative only; the host enforces authentication. | OpenAI Apps SDK reference, "Tool descriptor parameters" (`securitySchemes`, `_meta` back-compat mirror); developers.openai.com/plugins/build/auth "Triggering authentication UI" |
 | BLENDED-018 | `file_params` option (on `tool` and `interface`) | Names public action arguments of type `:map` or `{:array, :map}` that take files in the Apps SDK shape `{download_url, file_id, mime_type?, file_name?}`. Each leaves the `input` envelope and becomes a top-level `inputSchema` property with exactly the SDK's file object schema (or `{type: array, items: <it>}`), required at the top level when the argument is not nullable; `_meta["openai/fileParams"]` lists the names. On `tools/call`, each file field's value is checked for that shape (an array: 1 to 20 objects) and put back into the action input; a bad value is a tool error naming the field and the action does not run. `AshAi.McpActions`' `request` may carry `files` (a list), which the action receives as `context.mcp_files`. | OpenAI Apps SDK reference, "File APIs" (`openai/fileParams`, file schema, multiple files, runtime shape) |
 | BLENDED-019 | `initialize` version negotiation | A requested initialize-based revision that is supported is echoed; any other request is answered with the **latest** supported initialize-based revision (`2025-06-18`), not the oldest. **Upstream fix**: upstream answered `2025-03-26`; `protocol_2026_07_28_test.exs` ("initialize downgrades unsupported requested versions") and `mcp_action_test.exs` (an `initialize` without a version) now expect `2025-06-18`. | MCP 2025-11-25 lifecycle, "Version Negotiation" |
+| BLENDED-020 | Page-backed MCP Apps views: `mcp_ui_resource` option `page` (`module` or `{module, opts}` implementing the `AshAi.McpUiPage` behaviour), exactly one of `html_path`/`page`; `_meta` option on `mcp_ui_resource` | The view's document is a page of the application's UI framework (`c:AshAi.McpUiPage.document/2`), not a hand-written file. Its URI is the declared URI plus `@<digest8>` (first 8 hex of the document's SHA-256), in `resources/list` and as the only URI `resources/read` answers. A tool linked to it (`ui:`) carries the digest URI in `_meta.ui.resourceUri` and its alias `_meta["openai/outputTemplate"]`. Each page-backed resource adds one app-only tool, `<name>_presentation` (`_meta.ui.visibility: ["app"]`, input `{request: object}`), whose calls run `c:AshAi.McpUiPage.present/3` under the request's actor, tenant and context; `{:ok, map}` is `structuredContent`, `{:error, text}` an `isError` text. A resource's `_meta` map sits beside `ui` in the list and the read. Upstream's `html_path` form is unchanged. AshAi does not depend on any UI framework: ash_blueprint implements the behaviour (`AshBlueprint.McpApp`, package `ash_blueprint_mcp_app`). | MCP Apps 2026-01-26 (`ui://` resources, `_meta.ui.resourceUri`, `visibility: ["app"]`); OpenAI Apps SDK reference (`openai/outputTemplate`; "the template URI is the cache key"); hyperbob-cloud `reports/bobstack-mcp-apps-design-2026-09-30.md` §5, §12 |
+| BLENDED-021 | Server and tool icons and title: server options `mcp_title` and `mcp_icons` (router and `mcp_actions` section), tool/interface option `icons` | `serverInfo` gains `title` and `icons` when configured (initialize, and the 2026-07-28 `serverInfo` `_meta`); `tools/list` emits a tool's `icons`. An icon is `%{src, mime_type?, sizes?, theme?}` (atom or string keys; `src` an `https:`, `http:` or `data:` URL; `theme` `light`/`dark`), emitted as MCP `Icon` (`mimeType`). Any other shape raises `ArgumentError` naming the tool or option. | MCP 2025-11-25 `Implementation.title`/`icons`, `Tool.icons`; mcp-extensions `docs/spec.md:56-73` (entrypoint icon fallback: tool, then server) |
 
 ## MCP server output (`AshAi.Mcp.Server`)
 
@@ -136,6 +138,21 @@ Details the table above leaves open, resolved while implementing this branch.
   `tool_argument_transformer`. There is no `Ash.Type.File`: file fields are maps the application
   resolves; `context.mcp_files` is caller-supplied request data, never authority.
 
+- **BLENDED-020** — `AshAi.McpUiPage` (`lib/ash_ai/mcp_ui_page.ex`) holds the rules. The digest is
+  computed from the document rendered with the request's options, so a document must not depend
+  on the caller; one whose `document/2` fails keeps its declared URI in the list and cannot be
+  read. The presentation tool exists for every page-backed resource the server serves (the
+  `mcp_resources` option), independent of the `tools` option, and is not subject to upstream's
+  permission pre-check (the page's own actions are). A presentation tool name that a declared
+  tool or interface already names is a compile error (`AshAi.Transformers.McpApps`), as is a UI
+  resource with neither or both of `html_path` and `page`. A `present/3` result of any other
+  shape raises `ArgumentError` (wrapped by the McpAction as any server raise is). The
+  `openai/outputTemplate` alias is emitted for page-backed resources only, so `html_path`
+  resources keep upstream's `_meta` exactly. Its annotations are BLENDED-009's generic-action
+  defaults (destructive, not read-only), because the page's events may write.
+- **BLENDED-021** — `AshAi.Mcp.Icons` (`lib/ash_ai/mcp/icons.ex`) validates and renders icons
+  when the server answers; `[]` and unset emit nothing.
+
 ## Tests (the oracle)
 
 Every BLENDED row has ExUnit coverage beside the upstream tests, and all upstream tests still
@@ -157,6 +174,12 @@ pass. The Bobstack port's parity rows are these tests plus upstream's.
   policy denials, and the in-memory conn. Support: `test/support/mcp_actions.ex`.
 - `test/ash_ai/blended/open_ai_test.exs` — BLENDED-016, 018 (single and array file fields) and
   019. Support: `test/support/open_ai.ex`.
+- `test/ash_ai/blended/mcp_ui_page_test.exs` — BLENDED-020 (digest URI, read, `_meta`, the OpenAI
+  alias, the presentation tool and its results, the DSL refusals) and BLENDED-021 (server title
+  and icons in both eras, tool icons, icon refusals). Support: `test/support/mcp_ui_page.ex`.
+  The end-to-end proof with a real UI framework is ash_blueprint's `ash_blueprint_mcp_app`
+  package (its tests and the MCP Apps harness run in hyperbob-cloud
+  `reports/mcp-apps-page-ui-2026-10-02.md`).
 - `test/COVERAGE.md` — per-module coverage before and after, and the new-line coverage check.
 
 ## Upstreaming

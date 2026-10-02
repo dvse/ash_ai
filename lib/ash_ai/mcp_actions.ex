@@ -63,6 +63,15 @@ defmodule AshAi.McpActions do
         doc: "OpenAI strict-mode input schemas. Defaults to `false`, as the router does."
       ],
       mcp_name: [type: :string, doc: "The server name in `serverInfo`."],
+      mcp_title: [
+        type: :string,
+        doc: "The server title in `serverInfo` (BLENDED-021; the router's `mcp_title` option)."
+      ],
+      mcp_icons: [
+        type: {:list, :any},
+        doc:
+          "The server icons in `serverInfo`, as `AshAi.Mcp.Icons` (BLENDED-021; the router's `mcp_icons` option)."
+      ],
       mcp_server_version: [type: :string, doc: "The server version in `serverInfo`."],
       instructions: [type: :string, doc: "Server instructions sent to the client."],
       protocol_version_statement: [

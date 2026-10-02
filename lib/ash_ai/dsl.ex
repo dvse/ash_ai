@@ -113,6 +113,12 @@ defmodule AshAi.Dsl do
       default: [],
       doc:
         "Public action arguments of type `:map` or `{:array, :map}` that take files in the OpenAI Apps SDK shape `{download_url, file_id, mime_type, file_name}`. Each leaves the `input` envelope and becomes a top-level property with that exact schema (or an array of it), the tool's `_meta[\"openai/fileParams\"]` names them, and a call's values are checked for that shape and put back into the action input."
+    ],
+    # BLENDED-021: MCP 2025-11-25 `Tool.icons`
+    icons: [
+      type: {:list, :any},
+      doc:
+        "The tool's icons, as MCP 2025-11-25 `Icon`s: `%{src: url, mime_type: \"image/svg+xml\", sizes: [\"any\"], theme: \"light\" | \"dark\"}` (atom or string keys; `src` required). Emitted as the tool's `icons`. Hosts use them for entrypoints and launchers (an OpenAI sidebar icon is a monochrome `currentColor` SVG)."
     ]
   ]
 
@@ -456,8 +462,19 @@ defmodule AshAi.Dsl do
     ],
     html_path: [
       type: :string,
-      required: true,
-      doc: "Path to the HTML file on disk. Read at request time."
+      doc:
+        "Path to the HTML file on disk. Read at request time. Exactly one of `html_path` and `page` is required."
+    ],
+    # BLENDED-020: a page of the application's UI framework as the view.
+    page: [
+      type: {:spark_behaviour, AshAi.McpUiPage},
+      doc:
+        "A page-backed view: a module implementing `AshAi.McpUiPage` (`module` or `{module, opts}`), which renders the view's document and answers its app-only presentation tool `<name>_presentation`. The URI gains the document's content digest, `<uri>@<digest8>`. Exactly one of `html_path` and `page` is required."
+    ],
+    _meta: [
+      type: :any,
+      doc:
+        "Extra `_meta` keys of the resource, merged beside `ui` in `resources/list` and `resources/read` (for example `%{\"openai/ui\" => %{\"availableDisplayModes\" => [\"inline\", \"fullscreen\"]}}`)."
     ],
     title: [
       type: :string,
@@ -510,7 +527,8 @@ defmodule AshAi.Dsl do
     """,
     examples: [
       ~s(mcp_ui_resource :artist_viewer, "ui://artists/viewer.html", html_path: "priv/mcp_apps/artist_viewer.html"),
-      ~s(mcp_ui_resource :artist_dashboard, "ui://artists/dashboard.html", html_path: "priv/mcp_apps/artist_dashboard.html", csp: [connect_domains: ["api.example.com"]])
+      ~s(mcp_ui_resource :artist_dashboard, "ui://artists/dashboard.html", html_path: "priv/mcp_apps/artist_dashboard.html", csp: [connect_domains: ["api.example.com"]]),
+      ~s(mcp_ui_resource :artist_page, "ui://artists/page", page: {AshBlueprint.McpApp, page: MyApp.ArtistPage}, prefers_border: true)
     ],
     target: AshAi.McpUiResource,
     schema: @mcp_ui_resource_schema,

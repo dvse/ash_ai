@@ -15,6 +15,8 @@ defmodule AshAi.McpActions.Info do
     :forbidden_fields,
     :strict,
     :mcp_name,
+    :mcp_title,
+    :mcp_icons,
     :mcp_server_version,
     :instructions,
     :protocol_version_statement,
