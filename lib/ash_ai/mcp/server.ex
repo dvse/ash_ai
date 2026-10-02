@@ -987,7 +987,7 @@ defmodule AshAi.Mcp.Server do
   # improves upstream LLM prompt-cache hit rates); harmless for older revisions.
   defp tool_definitions(opts) do
     opts
-    |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions])
+    |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions, :mcp_resources])
     |> Keyword.update(
       :context,
       %{otp_app: opts[:otp_app]},
@@ -1004,7 +1004,9 @@ defmodule AshAi.Mcp.Server do
         "title" => Tool.title(tool),
         "description" => AshAi.Tools.description(tool),
         "inputSchema" =>
-          AshAi.Tools.parameter_schema(tool, strict: Keyword.get(opts, :strict, false)),
+          tool
+          |> AshAi.Tools.parameter_schema(strict: Keyword.get(opts, :strict, false))
+          |> hide_session_inputs(tool, opts),
         "annotations" => annotations_to_map(Tool.annotations(tool))
       }
       |> put_if("outputSchema", AshAi.Tool.Schema.output_for_tool(tool))
@@ -1036,18 +1038,100 @@ defmodule AshAi.Mcp.Server do
       %Tool{} = tool ->
         context = tool_context(opts)
 
-        with {:ok, transformed_args} <- transform_tool_arguments(tool, tool_args, context, opts),
-             # BLENDED-018: file fields go back into the action input.
-             {:ok, transformed_args} <-
-               AshAi.Tool.OpenAi.reconstruct_arguments(tool, transformed_args) do
-          execute_resolved_tool(tool, transformed_args, context, opts)
-        else
-          {:error, error_text} ->
-            {:ok, tool_error_result(error_text)}
+        case AshAi.Page.view_of(tool, mcp_ui_resources(opts)) do
+          nil -> execute_found_tool(tool, tool_args, context, opts)
+          view -> execute_page_tool(tool, view, tool_args, context, opts)
         end
 
       nil ->
         {:error, :tool_not_found}
+    end
+  end
+
+  # BLENDED-020: a tool of a page view runs in the caller's page session, and its result carries
+  # the page rendered after the call. The page's open tool runs only the render (the framework's
+  # mount, an upsert by session).
+  defp execute_page_tool(tool, view, tool_args, context, opts) do
+    case AshAi.Page.prepare(tool, tool_args, context, view) do
+      {:ok, call} ->
+        {:ok, result} =
+          cond do
+            open_tool?(tool, view) ->
+              {:ok,
+               %{"isError" => false, "content" => [%{"type" => "text", "text" => "Opened."}]}}
+
+            (mounted = AshAi.Page.ensure_mounted(tool, call, view, tool_args)) != :ok ->
+              {:error, text} = mounted
+              {:ok, tool_error_result(text)}
+
+            true ->
+              execute_found_tool(tool, call.arguments, call.context, opts)
+          end
+
+        errors =
+          if result["isError"],
+            do: Enum.map(result["content"] || [], &(&1["text"] || "")),
+            else: []
+
+        {:ok,
+         AshAi.Page.put_render(result, call, view, tool_args, errors, mcp_ui_resources(opts))}
+
+      {:error, error_text} ->
+        {:ok, tool_error_result(error_text)}
+    end
+  end
+
+  defp open_tool?(
+         %Tool{
+           resource: page,
+           action: %{name: :mount},
+           _meta: %{"ui" => %{"visibility" => ["app"]}}
+         },
+         %AshAi.McpUiResource{page: page}
+       ),
+       do: true
+
+  defp open_tool?(_tool, _view), do: false
+
+  defp hide_session_inputs(schema, tool, opts) do
+    case AshAi.Page.view_of(tool, mcp_ui_resources(opts)) do
+      nil ->
+        schema
+
+      view ->
+        hidden = AshAi.Page.hidden_inputs(tool, view)
+
+        schema
+        |> drop_properties(hidden)
+        |> Map.update("properties", %{}, fn properties ->
+          case properties do
+            %{"input" => %{} = input} ->
+              Map.put(properties, "input", drop_properties(input, hidden))
+
+            other ->
+              other
+          end
+        end)
+    end
+  end
+
+  defp drop_properties(%{"properties" => %{} = properties} = schema, names) do
+    schema
+    |> Map.put("properties", Map.drop(properties, names))
+    |> Map.update("required", [], &(&1 -- names))
+  end
+
+  defp drop_properties(schema, _names), do: schema
+
+  defp execute_found_tool(tool, tool_args, context, opts) do
+    with {:ok, transformed_args} <- transform_tool_arguments(tool, tool_args, context, opts),
+         # BLENDED-018: file fields go back into the action input.
+         {:ok, transformed_args} <-
+           AshAi.Tool.OpenAi.reconstruct_arguments(tool, transformed_args) do
+      execute_resolved_tool(tool, transformed_args, context, opts)
+    else
+      {:error, error_text} ->
+        {:ok, tool_error_result(error_text)}
     end
   end
 
@@ -1336,6 +1420,21 @@ defmodule AshAi.Mcp.Server do
     end
   end
 
+  # BLENDED-020: a page view's template is the page's client document.
+  defp read_mcp_resource(%AshAi.McpUiResource{page: page} = resource, _params, opts)
+       when not is_nil(page) do
+    info = %{
+      uri: resource.uri,
+      title: resource.title || Atom.to_string(resource.name),
+      server_url: opts[:server_url]
+    }
+
+    case AshAi.Page.adapter(page).document(page, info) do
+      {:ok, html} when is_binary(html) -> {:ok, html}
+      {:error, reason} -> {:error, "Failed to render the page template: #{reason}"}
+    end
+  end
+
   # sobelow_skip ["Traversal.FileModule"]
   # `html_path` is a developer-configured DSL value, not user-supplied input.
   defp read_mcp_resource(%AshAi.McpUiResource{html_path: path}, _params, _opts) do
@@ -1506,7 +1605,7 @@ defmodule AshAi.Mcp.Server do
 
   defp find_tool_by_name(tool_name, session_id, opts) do
     opts
-    |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions])
+    |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions, :mcp_resources])
     |> Keyword.update(
       :context,
       %{mcp_session_id: session_id},
@@ -1553,13 +1652,30 @@ defmodule AshAi.Mcp.Server do
       end
 
     opts
-    |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions])
+    |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions, :mcp_resources])
     |> Keyword.update(
       :context,
       %{otp_app: opts[:otp_app]},
       &Map.put(&1, :otp_app, opts[:otp_app])
     )
     |> AshAi.exposed_tools()
+    |> Kernel.++(page_tools(opts))
+  end
+
+  # BLENDED-020: the generated tools of every page view this server serves. They follow the
+  # served views (the `mcp_resources` option), not the `tools` option, and pass the same
+  # `can?` pre-check as every other tool.
+  defp page_tools(opts) do
+    if opts[:tools] in [false, []] do
+      []
+    else
+      opts
+      |> mcp_ui_resources()
+      |> AshAi.Page.tools()
+      |> Enum.filter(fn tool ->
+        AshAi.can?(opts[:actor], tool.domain, tool.resource, tool.action, opts[:tenant])
+      end)
+    end
   end
 
   @doc """

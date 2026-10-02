@@ -456,8 +456,13 @@ defmodule AshAi.Dsl do
     ],
     html_path: [
       type: :string,
-      required: true,
-      doc: "Path to the HTML file on disk. Read at request time."
+      doc:
+        "Path to the HTML file on disk. Read at request time. Exactly one of `html_path` and `page` is required."
+    ],
+    page: [
+      type: :atom,
+      doc:
+        "A page of the application's UI framework, as the view instead of an HTML file (BLENDED-020). The view's template is the page's client; the page's own actions become app-only tools whose results carry the page's server render. See `AshAi.Page`."
     ],
     title: [
       type: :string,
@@ -510,7 +515,8 @@ defmodule AshAi.Dsl do
     """,
     examples: [
       ~s(mcp_ui_resource :artist_viewer, "ui://artists/viewer.html", html_path: "priv/mcp_apps/artist_viewer.html"),
-      ~s(mcp_ui_resource :artist_dashboard, "ui://artists/dashboard.html", html_path: "priv/mcp_apps/artist_dashboard.html", csp: [connect_domains: ["api.example.com"]])
+      ~s(mcp_ui_resource :artist_dashboard, "ui://artists/dashboard.html", html_path: "priv/mcp_apps/artist_dashboard.html", csp: [connect_domains: ["api.example.com"]]),
+      ~s(mcp_ui_resource :artist_page, "ui://artists/page", page: MyApp.ArtistPage)
     ],
     target: AshAi.McpUiResource,
     schema: @mcp_ui_resource_schema,

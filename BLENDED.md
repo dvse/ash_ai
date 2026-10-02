@@ -11,7 +11,7 @@ core Ash (`Ash.Info.Manifest`, action types, action metadata).
 
 ## DSL (domain and resource `tools` section)
 
-Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`, `mcp_ui_resource`.
+Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`, `mcp_ui_resource` (which gains `page`, BLENDED-020).
 
 | Id | Addition | Shape | Source |
 |---|---|---|---|
@@ -33,6 +33,7 @@ Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`
 | BLENDED-016 | `security_schemes` option (on `tool` and `interface`; default from the MCP server's / `mcp_actions` section's `security_schemes` option) | A list of `%{type: "noauth"}` or `%{type: "oauth2", scopes: [String.t()]}` (atom or string keys). `tools/list` emits it as the tool's top-level `securitySchemes` and mirrors it in `_meta["securitySchemes"]`. Unset everywhere, nothing is emitted. `AshAi.McpActions`' `request` may carry `security_schemes`: the host that authenticates the endpoint states them per request, as it states `server_url`, and they replace the section's default. Any other shape raises `ArgumentError` naming the tool. Declarative only; the host enforces authentication. | OpenAI Apps SDK reference, "Tool descriptor parameters" (`securitySchemes`, `_meta` back-compat mirror); developers.openai.com/plugins/build/auth "Triggering authentication UI" |
 | BLENDED-018 | `file_params` option (on `tool` and `interface`) | Names public action arguments of type `:map` or `{:array, :map}` that take files in the Apps SDK shape `{download_url, file_id, mime_type?, file_name?}`. Each leaves the `input` envelope and becomes a top-level `inputSchema` property with exactly the SDK's file object schema (or `{type: array, items: <it>}`), required at the top level when the argument is not nullable; `_meta["openai/fileParams"]` lists the names. On `tools/call`, each file field's value is checked for that shape (an array: 1 to 20 objects) and put back into the action input; a bad value is a tool error naming the field and the action does not run. `AshAi.McpActions`' `request` may carry `files` (a list), which the action receives as `context.mcp_files`. | OpenAI Apps SDK reference, "File APIs" (`openai/fileParams`, file schema, multiple files, runtime shape) |
 | BLENDED-019 | `initialize` version negotiation | A requested initialize-based revision that is supported is echoed; any other request is answered with the **latest** supported initialize-based revision (`2025-06-18`), not the oldest. **Upstream fix**: upstream answered `2025-03-26`; `protocol_2026_07_28_test.exs` ("initialize downgrades unsupported requested versions") and `mcp_action_test.exs` (an `initialize` without a version) now expect `2025-06-18`. | MCP 2025-11-25 lifecycle, "Version Negotiation" |
+| BLENDED-020 | `page` option on `mcp_ui_resource` (exactly one of `html_path`/`page`): a page of the application's UI framework as an MCP Apps view (`AshAi.Page`) | The view's template (`resources/read`) is the page's client document (`c:AshAi.Page.document/2`), at the authored URI, the same for every caller. Every action the page's view binds (`c:AshAi.Page.actions/1`), and the page's `:mount` as its open tool, become ordinary tools: name `<resource>_<action>` (open tool: the page's name), `_meta.ui = {resourceUri, visibility: ["app"]}`, listed for every served page view (the `mcp_resources` option) with upstream's `can?` pre-check, independent of the `tools` option. A call of any tool whose `_meta.ui.resourceUri` names a page view runs in the caller's page session (`AshAi.Page.session_id/2`, a digest of the actor's identity and the page; no actor is refused), with the session's Ash context and owned inputs (`c:AshAi.Page.session/2`) filled by the server and hidden from the input schema; a page-resource action first mounts the row (optional `c:AshAi.Page.mount/3`). Its result is upstream's, plus `_meta["ash_ai/page"]`: the page rendered after the call (`c:AshAi.Page.render/3`: the framework's own render, plus `bindings` mapping each event key to `{tool, arguments, event, accept, boundField}`), also on an `isError` result (with its error texts). The framework is the page resource's extension exporting `mcp_page_adapter/0`; ash_ai depends on none (ash_blueprint: `AshBlueprint.Phoenix.McpPage`). Upstream's `html_path` form is unchanged. | MCP Apps 2026-01-26 (`ui://` resources, `_meta.ui.resourceUri`, `visibility: ["app"]`, view-initiated `tools/call`); OpenAI Apps SDK reference (`toolResponseMetadata`: "widget-only tool result metadata"); hyperbob-cloud `reports/mcp-apps-bobstack-ui-design-2026-10-03.md` |
 
 ## MCP server output (`AshAi.Mcp.Server`)
 
@@ -136,6 +137,13 @@ Details the table above leaves open, resolved while implementing this branch.
   `tool_argument_transformer`. There is no `Ash.Type.File`: file fields are maps the application
   resolves; `context.mcp_files` is caller-supplied request data, never authority.
 
+- **BLENDED-020** — `AshAi.Page` (`lib/ash_ai/page.ex`) holds the rules. BLENDED-021 (server and
+  tool icons and title) is withdrawn: those are host metadata, supplied outside the application.
+  The page's open tool runs no Ash action of its own: it is the framework's mount (an upsert by
+  session) and render. The session digest uses the actor's resource and primary key when the actor
+  is an Ash record, the actor term otherwise. Binding tool names are mapped by ash_ai from the
+  framework's `{resource, action}`.
+
 ## Tests (the oracle)
 
 Every BLENDED row has ExUnit coverage beside the upstream tests, and all upstream tests still
@@ -157,6 +165,11 @@ pass. The Bobstack port's parity rows are these tests plus upstream's.
   policy denials, and the in-memory conn. Support: `test/support/mcp_actions.ex`.
 - `test/ash_ai/blended/open_ai_test.exs` — BLENDED-016, 018 (single and array file fields) and
   019. Support: `test/support/open_ai.ex`.
+- `test/ash_ai/blended/page_test.exs` — BLENDED-020 (the DSL refusals, listing and the template,
+  the generated tools and their schemas, the page in linked and generated tool results, session
+  isolation, row bindings, error renders, anonymous refusal). Support: `test/support/page.ex`.
+  The end-to-end proof with a real framework is ash_blueprint's Phoenix example
+  (`packages/ash_blueprint_phoenix`, `script/serve_mcp_notes.exs`) under the MCP Apps harness.
 - `test/COVERAGE.md` — per-module coverage before and after, and the new-line coverage check.
 
 ## Upstreaming

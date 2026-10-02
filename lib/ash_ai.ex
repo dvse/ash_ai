@@ -337,7 +337,8 @@ defmodule AshAi do
     @type t :: %__MODULE__{
             name: atom(),
             uri: String.t(),
-            html_path: String.t(),
+            html_path: String.t() | nil,
+            page: module() | nil,
             title: String.t() | nil,
             description: String.t() | nil,
             csp: keyword() | nil,
@@ -350,6 +351,7 @@ defmodule AshAi do
       :name,
       :uri,
       :html_path,
+      :page,
       :title,
       :description,
       :csp,
@@ -983,7 +985,9 @@ defmodule AshAi do
     end)
   end
 
-  defp can?(actor, domain, resource, action, tenant) do
+  @doc false
+  # BLENDED-020: also the pre-check of a page view's generated tools.
+  def can?(actor, domain, resource, action, tenant) do
     if Enum.empty?(Ash.Resource.Info.authorizers(resource)) do
       true
     else
