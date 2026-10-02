@@ -152,15 +152,25 @@ defmodule AshAi.Page do
     "mcp-" <> digest
   end
 
+  # The actor's stable identity: an Ash record's resource and primary key, else its `id`, else
+  # the whole term. Fields that vary between a user's requests must not change the session.
   defp actor_key(%resource{} = actor) do
     if Ash.Resource.Info.resource?(resource) do
       {resource, Map.take(actor, Ash.Resource.Info.primary_key(resource))}
     else
-      actor
+      map_actor_key(actor)
     end
   end
 
+  defp actor_key(actor) when is_map(actor), do: map_actor_key(actor)
   defp actor_key(actor), do: actor
+
+  defp map_actor_key(actor) do
+    case Map.get(actor, :id, Map.get(actor, "id")) do
+      nil -> actor
+      id -> {:id, id}
+    end
+  end
 
   @doc "The tool name of a page action."
   def tool_name(resource, action) do
@@ -233,7 +243,11 @@ defmodule AshAi.Page do
   def prepare(%AshAi.Tool{} = tool, arguments, context, %AshAi.McpUiResource{} = view) do
     case session_id(context[:actor], view.page) do
       nil ->
-        {:error, "This view needs a signed-in user."}
+        # The author's own tool keeps working for an anonymous caller, without the page; the
+        # page's tools need a page session, which needs a signed-in caller.
+        if generated?(tool, view),
+          do: {:error, "This view needs a signed-in user."},
+          else: :anonymous
 
       session ->
         adapter = adapter(view.page)
@@ -263,6 +277,38 @@ defmodule AshAi.Page do
   end
 
   defp fill_session_inputs(_tool, arguments, _inputs, _page), do: arguments
+
+  @doc "Whether a tool is one of a page view's generated tools (its open tool or a bound action)."
+  def generated?(
+        %AshAi.Tool{_meta: %{"ui" => %{"visibility" => ["app"], "resourceUri" => uri}}} = tool,
+        %AshAi.McpUiResource{uri: uri, page: page}
+      ) do
+    (tool.resource == page and tool.action.name == :mount) or
+      {tool.resource, tool.action.name} in adapter(page).actions(page)
+  end
+
+  def generated?(_tool, _view), do: false
+
+  @doc """
+  Refuses generated tool names that clash with each other or with the server's other tools: the
+  call would otherwise reach whichever one is found first.
+  """
+  def ensure_unique_names!(tools) do
+    case tools
+         |> Enum.map(& &1.name)
+         |> Enum.frequencies()
+         |> Enum.filter(fn {_, n} -> n > 1 end) do
+      [] ->
+        tools
+
+      clashes ->
+        names =
+          clashes |> Enum.map(&elem(&1, 0)) |> Enum.sort() |> Enum.map_join(", ", &to_string/1)
+
+        raise ArgumentError,
+              "page view tools clash with other tools of this server: #{names}; rename the tool or the page action"
+    end
+  end
 
   @doc "The input names a tool's action takes."
   def accepted_inputs(%AshAi.Tool{action: action}) do

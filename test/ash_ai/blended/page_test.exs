@@ -220,6 +220,30 @@ defmodule AshAi.Blended.PageTest do
       assert linked["_meta"]["ash_ai/page"]["html"] == "count=3"
     end
 
+    test "the author's linked tool still answers an anonymous caller, without the page" do
+      result = call("show_counter", %{}, nil)
+      refute result["isError"]
+      refute result["_meta"]["ash_ai/page"]
+    end
+
+    test "a user's page session follows their identity, not the rest of the actor" do
+      assert AshAi.Page.session_id(%{id: "alice", name: "Alice"}, CounterPage) ==
+               AshAi.Page.session_id(%{id: "alice", name: "A.", lease: 2}, CounterPage)
+
+      refute AshAi.Page.session_id(@alice, CounterPage) ==
+               AshAi.Page.session_id(@bob, CounterPage)
+
+      refute AshAi.Page.session_id(@alice, CounterPage) == AshAi.Page.session_id(@alice, Item)
+    end
+
+    test "page view tools may not clash with other tools" do
+      tools = [%AshAi.Tool{name: :counter_page}, %AshAi.Tool{name: :counter_page}]
+
+      assert_raise ArgumentError, ~r/clash with other tools of this server: counter_page/, fn ->
+        AshAi.Page.ensure_unique_names!(tools)
+      end
+    end
+
     test "tools that are not the view's carry no page" do
       result = call("list_items", %{}, @alice)
       refute result["_meta"]["ash_ai/page"]

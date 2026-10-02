@@ -1053,6 +1053,9 @@ defmodule AshAi.Mcp.Server do
   # mount, an upsert by session).
   defp execute_page_tool(tool, view, tool_args, context, opts) do
     case AshAi.Page.prepare(tool, tool_args, context, view) do
+      :anonymous ->
+        execute_found_tool(tool, tool_args, context, opts)
+
       {:ok, call} ->
         {:ok, result} =
           cond do
@@ -1679,6 +1682,7 @@ defmodule AshAi.Mcp.Server do
     )
     |> AshAi.exposed_tools()
     |> Kernel.++(page_tools(opts))
+    |> AshAi.Page.ensure_unique_names!()
   end
 
   # BLENDED-020: the generated tools of every page view this server serves. They follow the
