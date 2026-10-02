@@ -435,7 +435,10 @@ defmodule AshAi.Mcp.Server do
   end
 
   defp result_2026_07_28(result, opts) do
-    server_info = server_info(opts)
+    server_info = %{
+      "name" => get_server_name(opts),
+      "version" => get_server_version(opts)
+    }
 
     result
     |> Map.put("resultType", "complete")
@@ -634,17 +637,6 @@ defmodule AshAi.Mcp.Server do
     end
   end
 
-  # BLENDED-021: MCP 2025-11-25 `Implementation` `title` and `icons`, beside upstream's name and
-  # version; each is present only when configured.
-  defp server_info(opts) do
-    %{
-      "name" => get_server_name(opts),
-      "version" => get_server_version(opts)
-    }
-    |> put_if("title", opts[:mcp_title])
-    |> put_if("icons", AshAi.Mcp.Icons.normalize(opts[:mcp_icons], "mcp_icons"))
-  end
-
   @doc """
   Get the MCP server instructions, if any. Returns the configured `instructions`
   option (a string) or the result of calling it as a 1-arity function with the
@@ -761,7 +753,10 @@ defmodule AshAi.Mcp.Server do
 
         result =
           %{
-            "serverInfo" => server_info(opts),
+            "serverInfo" => %{
+              "name" => get_server_name(opts),
+              "version" => get_server_version(opts)
+            },
             "protocolVersion" => protocol_version_statement,
             "capabilities" => capabilities
           }
@@ -991,9 +986,6 @@ defmodule AshAi.Mcp.Server do
   # Deterministic ordering per 2026-07-28 (enables client caching and
   # improves upstream LLM prompt-cache hit rates); harmless for older revisions.
   defp tool_definitions(opts) do
-    page_resources = opts |> mcp_ui_resources() |> Enum.filter(&AshAi.McpUiPage.page?/1)
-    page_uris = page_uris(page_resources, opts)
-
     opts
     |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions])
     |> Keyword.update(
@@ -1016,35 +1008,11 @@ defmodule AshAi.Mcp.Server do
         "annotations" => annotations_to_map(Tool.annotations(tool))
       }
       |> put_if("outputSchema", AshAi.Tool.Schema.output_for_tool(tool))
-      |> put_if("icons", AshAi.Mcp.Icons.normalize(tool.icons, "tool #{tool.name}"))
-      |> put_meta(
-        tool
-        |> Tool.meta()
-        |> Map.merge(AshAi.Tool.OpenAi.file_params_meta(tool))
-        |> page_ui_meta(page_uris)
-      )
+      |> put_meta(Map.merge(Tool.meta(tool), AshAi.Tool.OpenAi.file_params_meta(tool)))
       |> put_security_schemes(AshAi.Tool.OpenAi.security_schemes(tool, opts[:security_schemes]))
     end)
-    |> Kernel.++(Enum.map(page_resources, &AshAi.McpUiPage.presentation_tool_definition/1))
     |> Enum.sort_by(& &1["name"])
   end
-
-  # BLENDED-020: a page-backed resource's tools and their resources name it by its digest URI,
-  # under the MCP Apps key and its OpenAI alias.
-  defp page_uris(page_resources, opts) do
-    Map.new(page_resources, &{&1.uri, AshAi.McpUiPage.uri(&1, opts)})
-  end
-
-  defp page_ui_meta(%{"ui" => %{"resourceUri" => uri} = ui} = meta, page_uris)
-       when is_map_key(page_uris, uri) do
-    digest_uri = Map.fetch!(page_uris, uri)
-
-    meta
-    |> Map.put("ui", Map.put(ui, "resourceUri", digest_uri))
-    |> Map.put("openai/outputTemplate", digest_uri)
-  end
-
-  defp page_ui_meta(meta, _page_uris), do: meta
 
   defp resource_definitions(opts) do
     action_resources =
@@ -1064,22 +1032,6 @@ defmodule AshAi.Mcp.Server do
     tool_name = params["name"]
     tool_args = params["arguments"] || %{}
 
-    # BLENDED-020: a page-backed resource's app-only presentation tool.
-    case find_presentation_tool(tool_name, opts) do
-      %AshAi.McpUiResource{} = resource -> AshAi.McpUiPage.present(resource, tool_args, opts)
-      nil -> execute_declared_tool_call(tool_name, tool_args, session_id, opts)
-    end
-  end
-
-  defp find_presentation_tool(tool_name, opts) do
-    opts
-    |> mcp_ui_resources()
-    |> Enum.find(
-      &(AshAi.McpUiPage.page?(&1) and AshAi.McpUiPage.presentation_tool(&1) == tool_name)
-    )
-  end
-
-  defp execute_declared_tool_call(tool_name, tool_args, session_id, opts) do
     case find_tool_by_name(tool_name, session_id, opts) do
       %Tool{} = tool ->
         context = tool_context(opts)
@@ -1365,7 +1317,8 @@ defmodule AshAi.Mcp.Server do
         |> then(fn content ->
           case resource do
             %AshAi.McpUiResource{} = mcp_ui_resource ->
-              put_if(content, "_meta", ui_resource_meta(mcp_ui_resource, opts))
+              ui_meta = build_ui_meta(mcp_ui_resource, opts)
+              put_if(content, "_meta", if(ui_meta != %{}, do: %{"ui" => ui_meta}))
 
             _ ->
               content
@@ -1377,27 +1330,14 @@ defmodule AshAi.Mcp.Server do
   end
 
   defp find_mcp_resource_by_uri(uri, opts) do
-    case Enum.find(mcp_resources(opts), &(resource_uri(&1, opts) == uri)) do
+    case Enum.find(mcp_resources(opts), &(&1.uri == uri)) do
       nil -> {:error, :not_found}
       resource -> {:ok, resource}
     end
   end
 
-  # BLENDED-020: a page-backed resource is read at its digest URI only.
-  defp resource_uri(%AshAi.McpUiResource{} = resource, opts),
-    do: AshAi.McpUiPage.uri(resource, opts)
-
-  defp resource_uri(resource, _opts), do: resource.uri
-
   # sobelow_skip ["Traversal.FileModule"]
   # `html_path` is a developer-configured DSL value, not user-supplied input.
-  defp read_mcp_resource(%AshAi.McpUiResource{page: {_module, _opts}} = resource, _params, opts) do
-    case AshAi.McpUiPage.document(resource, opts) do
-      {:ok, _html} = ok -> ok
-      {:error, reason} -> {:error, "Failed to render page: #{inspect(reason)}"}
-    end
-  end
-
   defp read_mcp_resource(%AshAi.McpUiResource{html_path: path}, _params, _opts) do
     case File.read(path) do
       {:ok, _contents} = ok -> ok
@@ -1452,23 +1392,16 @@ defmodule AshAi.Mcp.Server do
   end
 
   defp ui_resource_to_map(%AshAi.McpUiResource{} = resource, opts) do
+    ui_meta = build_ui_meta(resource, opts)
+
     %{
       "name" => Atom.to_string(resource.name),
-      "uri" => AshAi.McpUiPage.uri(resource, opts),
+      "uri" => resource.uri,
       "title" => resource.title || Atom.to_string(resource.name),
       "mimeType" => AshAi.McpUiResource.mime_type()
     }
     |> put_if("description", resource.description)
-    |> put_if("_meta", ui_resource_meta(resource, opts))
-  end
-
-  # BLENDED-020: the resource's own `_meta` keys sit beside `ui`.
-  defp ui_resource_meta(resource, opts) do
-    ui_meta = build_ui_meta(resource, opts)
-
-    (resource._meta || %{})
-    |> then(&if(ui_meta != %{}, do: Map.put(&1, "ui", ui_meta), else: &1))
-    |> then(&if(&1 == %{}, do: nil, else: &1))
+    |> put_if("_meta", if(ui_meta != %{}, do: %{"ui" => ui_meta}))
   end
 
   defp build_ui_meta(%AshAi.McpUiResource{} = resource, opts) do

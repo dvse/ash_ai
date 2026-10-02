@@ -49,8 +49,6 @@ defmodule AshAi do
       :interface,
       # BLENDED-016/018 (see BLENDED.md)
       :security_schemes,
-      # BLENDED-021 (see BLENDED.md)
-      :icons,
       file_params: [],
       refine?: true,
       continuation_target?: false,
@@ -331,9 +329,6 @@ defmodule AshAi do
     The HTML file at `html_path` is read at request time and returned with MIME type
     `text/html;profile=mcp-app`.
 
-    A page-backed resource (`page: {Module, opts}`, BLENDED-020) serves a page of the
-    application's UI framework instead: see `AshAi.McpUiPage`.
-
     See [MCP Apps spec](https://modelcontextprotocol.io/specification/2025-11-25).
     """
 
@@ -342,9 +337,7 @@ defmodule AshAi do
     @type t :: %__MODULE__{
             name: atom(),
             uri: String.t(),
-            html_path: String.t() | nil,
-            page: {module(), keyword()} | nil,
-            _meta: map() | nil,
+            html_path: String.t(),
             title: String.t() | nil,
             description: String.t() | nil,
             csp: keyword() | nil,
@@ -363,9 +356,6 @@ defmodule AshAi do
       :permissions,
       :domain,
       :prefers_border,
-      # BLENDED-020 (see BLENDED.md)
-      :page,
-      :_meta,
       __spark_metadata__: nil
     ]
 
@@ -413,7 +403,6 @@ defmodule AshAi do
         :hints,
         :__identifier__,
         :security_schemes,
-        :icons,
         file_params: [],
         refine?: true,
         continuation_target?: false,

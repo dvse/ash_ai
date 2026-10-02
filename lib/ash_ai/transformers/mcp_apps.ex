@@ -12,66 +12,6 @@ defmodule AshAi.Transformers.McpApps do
   def transform(dsl_state) do
     ui_resources = Spark.Dsl.Transformer.get_entities(dsl_state, [:mcp_resources])
 
-    with :ok <- verify_sources(ui_resources),
-         :ok <- verify_presentation_tools(dsl_state, ui_resources) do
-      resolve_tool_uis(dsl_state, ui_resources)
-    end
-  end
-
-  # BLENDED-020: a UI resource is served from exactly one source.
-  defp verify_sources(ui_resources) do
-    ui_resources
-    |> Enum.filter(&match?(%AshAi.McpUiResource{}, &1))
-    |> Enum.find_value(:ok, fn
-      %{html_path: nil, page: nil, name: name} ->
-        {:error,
-         Spark.Error.DslError.exception(
-           path: [:mcp_resources, name],
-           message:
-             "mcp_ui_resource `#{name}` needs `html_path` (a static file) or `page` (an `AshAi.McpUiPage` module)"
-         )}
-
-      %{html_path: path, page: page, name: name} when not is_nil(path) and not is_nil(page) ->
-        {:error,
-         Spark.Error.DslError.exception(
-           path: [:mcp_resources, name],
-           message:
-             "mcp_ui_resource `#{name}` sets both `html_path` and `page`; a view is served from one of them"
-         )}
-
-      _resource ->
-        nil
-    end)
-  end
-
-  # BLENDED-020: a page-backed resource's app-only `<name>_presentation` tool must not shadow a
-  # declared tool.
-  defp verify_presentation_tools(dsl_state, ui_resources) do
-    declared =
-      MapSet.new(
-        Enum.map(AshAi.Info.action_tools(dsl_state), &to_string(&1.name)) ++
-          Enum.flat_map(AshAi.Info.exposes(dsl_state), fn expose ->
-            Enum.map(expose.interfaces, &to_string(&1.name))
-          end)
-      )
-
-    ui_resources
-    |> Enum.filter(&AshAi.McpUiPage.page?/1)
-    |> Enum.find_value(:ok, fn resource ->
-      name = AshAi.McpUiPage.presentation_tool(resource)
-
-      if MapSet.member?(declared, name) do
-        {:error,
-         Spark.Error.DslError.exception(
-           path: [:mcp_resources, resource.name],
-           message:
-             "mcp_ui_resource `#{resource.name}` serves its page through the app-only tool `#{name}`, which a declared tool already names"
-         )}
-      end
-    end)
-  end
-
-  defp resolve_tool_uis(dsl_state, ui_resources) do
     dsl_state
     |> AshAi.Info.action_tools()
     |> Enum.filter(& &1.ui)

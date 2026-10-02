@@ -107,7 +107,6 @@ defmodule AshAi.Info do
       output_schema?: exposed.output_schema?,
       security_schemes: exposed.security_schemes,
       file_params: exposed.file_params,
-      icons: exposed.icons,
       load: [],
       async: true,
       arguments: [],

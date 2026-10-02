@@ -19,9 +19,6 @@ if Code.ensure_loaded?(Plug) do
     default — MCP clients don't constrain sampling with the schema, so the
     honest form is smaller and clearer. Pass `strict: true` to restore it.
 
-    `mcp_title` and `mcp_icons` (a list of `AshAi.Mcp.Icons` maps) add `title` and `icons` to
-    `serverInfo` (BLENDED-021).
-
     A `tool_argument_transformer` option may be a three-arity function receiving
     the resolved `%AshAi.Tool{}`, its argument map, and the request's Ash tool
     context. It must return `{:ok, arguments}` or `{:error, message}`. Rejections
