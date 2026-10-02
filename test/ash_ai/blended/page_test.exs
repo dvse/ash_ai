@@ -72,6 +72,14 @@ defmodule AshAi.Blended.PageTest do
       assert content["text"] =~ "<title>Counter</title>"
     end
 
+    test "a page view without a csp may load from the application's own origin" do
+      %{"result" => %{"resources" => resources}} = rpc("resources/list", %{}, @alice)
+      view = Enum.find(resources, &(&1["uri"] == "ui://counter/view"))
+      assert view["_meta"]["ui"]["csp"] == %{"resourceDomains" => ["http://www.example.com"]}
+      static = Enum.find(resources, &(&1["uri"] == "ui://static/view.html"))
+      assert static["_meta"]["ui"]["csp"] == %{}
+    end
+
     test "the template is the same for every caller" do
       read = fn actor ->
         %{"result" => %{"contents" => [c]}} =
@@ -243,6 +251,8 @@ defmodule AshAi.Blended.PageTest do
         "params" => params
       })
       |> Plug.Conn.put_req_header("accept", "application/json, text/event-stream")
+      # The MCP server derives its URL from the request's `host` header.
+      |> then(&%{&1 | req_headers: [{"host", "www.example.com"} | &1.req_headers]})
       |> then(&if(actor, do: Ash.PlugHelpers.set_actor(&1, actor), else: &1))
 
     conn =
