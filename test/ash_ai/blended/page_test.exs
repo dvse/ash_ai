@@ -72,10 +72,10 @@ defmodule AshAi.Blended.PageTest do
       assert content["text"] =~ "<title>Counter</title>"
     end
 
-    test "a page view without a csp may load from the application's own origin" do
+    test "a page view declares upstream's empty csp: its template loads nothing" do
       %{"result" => %{"resources" => resources}} = rpc("resources/list", %{}, @alice)
       view = Enum.find(resources, &(&1["uri"] == "ui://counter/view"))
-      assert view["_meta"]["ui"]["csp"] == %{"resourceDomains" => ["http://www.example.com"]}
+      assert view["_meta"]["ui"]["csp"] == %{}
       static = Enum.find(resources, &(&1["uri"] == "ui://static/view.html"))
       assert static["_meta"]["ui"]["csp"] == %{}
     end

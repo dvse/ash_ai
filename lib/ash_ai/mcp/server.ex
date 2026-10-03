@@ -1522,7 +1522,7 @@ defmodule AshAi.Mcp.Server do
     csp =
       case resource.csp do
         list when is_list(list) -> keyword_to_camel_case_map(list)
-        _ -> default_csp(resource, opts)
+        _ -> %{}
       end
 
     domain = resolve_domain(resource.domain, opts)
@@ -1532,22 +1532,6 @@ defmodule AshAi.Mcp.Server do
     |> put_if("domain", domain)
     |> put_if("prefersBorder", resource.prefers_border)
   end
-
-  # BLENDED-020: a page view without a `csp` may load what its template references from the
-  # application's own origin (the MCP server URL's), and nothing else.
-  defp default_csp(%AshAi.McpUiResource{page: page}, opts) when not is_nil(page) do
-    case opts[:server_url] && URI.parse(opts[:server_url]) do
-      %URI{scheme: scheme, host: host} = uri
-      when is_binary(scheme) and is_binary(host) and host != "" ->
-        port = if uri.port in [nil, URI.default_port(scheme)], do: "", else: ":#{uri.port}"
-        %{"resourceDomains" => ["#{scheme}://#{host}#{port}"]}
-
-      _ ->
-        %{}
-    end
-  end
-
-  defp default_csp(_resource, _opts), do: %{}
 
   @doc """
   Computes the sandbox domain for an `mcp_ui_resource` from the MCP server URL.
