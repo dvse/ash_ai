@@ -101,7 +101,7 @@ defmodule AshAi.Blended.PageTest do
     test "the page's open tool and bound actions are app-only tools of the view" do
       tools = tools(@alice)
 
-      for name <- ["counter_page", "counter_page_close", "counter_page_increment", "item_toggle"] do
+      for name <- ["counter_page", "counter_page__close", "counter_page_increment", "item_toggle"] do
         tool = Map.fetch!(tools, name)
 
         assert tool["_meta"]["ui"] == %{
@@ -145,7 +145,7 @@ defmodule AshAi.Blended.PageTest do
 
     test "the close tool is app-only and takes the presentation alone" do
       tools = tools(@alice)
-      close = tools["counter_page_close"]
+      close = tools["counter_page__close"]
 
       assert close["_meta"]["ui"] == %{
                "resourceUri" => "ui://counter/view",
@@ -160,8 +160,8 @@ defmodule AshAi.Blended.PageTest do
 
       refute Map.has_key?(close, "outputSchema")
       assert close["description"] == "Closes the counter view's live presentation."
-      assert tools["guarded_page_close"]["_meta"]["ui"]["resourceUri"] == "ui://guarded/view"
-      refute Map.has_key?(tools(@alice, mcp_resources: [:static]), "counter_page_close")
+      assert tools["guarded_page__close"]["_meta"]["ui"]["resourceUri"] == "ui://guarded/view"
+      refute Map.has_key?(tools(@alice, mcp_resources: [:static]), "counter_page__close")
     end
 
     test "a server without page views lists exactly the tools it listed before them" do
@@ -392,7 +392,7 @@ defmodule AshAi.Blended.PageTest do
 
     test "the close tool closes the caller's presentation through the framework" do
       session = AshAi.Page.session_id(@alice, CounterPage)
-      result = call("counter_page_close", %{"presentation" => "tab-1"}, @alice)
+      result = call("counter_page__close", %{"presentation" => "tab-1"}, @alice)
 
       assert result == %{
                "isError" => false,
@@ -402,7 +402,7 @@ defmodule AshAi.Blended.PageTest do
       assert_received {:page_close, ^session, "tab-1"}
       refute_received {:page_render, _}
 
-      refused = call("counter_page_close", %{"presentation" => "stuck"}, @alice)
+      refused = call("counter_page__close", %{"presentation" => "stuck"}, @alice)
       assert refused["isError"]
 
       assert refused["content"] == [
@@ -411,25 +411,53 @@ defmodule AshAi.Blended.PageTest do
 
       assert_received {:page_close, ^session, "stuck"}
 
-      missing = call("counter_page_close", %{}, @alice)
+      missing = call("counter_page__close", %{}, @alice)
       assert missing["content"] == [%{"type" => "text", "text" => "presentation is required."}]
       refute_received {:page_close, _, _}
 
-      assert call("counter_page_close", %{"presentation" => "tab-1"}, nil)["content"] == [
+      assert call("counter_page__close", %{"presentation" => "tab-1"}, nil)["content"] == [
                %{"type" => "text", "text" => "This view needs a signed-in user."}
              ]
     end
 
     test "a framework without close/3 answers the close tool, doing nothing" do
-      assert call("guarded_page_close", %{"presentation" => "tab-1"}, @alice) ==
+      assert call("guarded_page__close", %{"presentation" => "tab-1"}, @alice) ==
                %{"isError" => false, "content" => [%{"type" => "text", "text" => "Done."}]}
     end
 
-    test "a close tool name clashes like any page tool" do
-      tools = [%AshAi.Tool{name: :counter_page_close}, %AshAi.Tool{name: :counter_page_close}]
+    test "a page action named close keeps its own tool, apart from the close tool" do
+      tools = tools(@alice)
+      assert tools["counter_page_close"]["inputSchema"]["properties"]["presentation"]
+
+      assert tools["counter_page__close"]["description"] ==
+               "Closes the counter view's live presentation."
+
+      call("counter_page_increment", %{"input" => %{"by" => 3}}, @alice)
+      result = call("counter_page_close", %{"presentation" => "tab-1"}, @alice)
+      refute result["isError"]
+      assert result["structuredContent"]["count"] == 0
+      assert_received {:page_render, "tab-1"}
+      refute_received {:page_close, _, _}
+
+      closed = call("counter_page__close", %{"presentation" => "tab-1"}, @alice)
+      assert closed["content"] == [%{"type" => "text", "text" => "Done."}]
+      assert_received {:page_close, _, "tab-1"}
 
       assert_raise ArgumentError,
-                   ~r/clash with other tools of this server: counter_page_close/,
+                   ~r/clash with other tools of this server: counter_page__close/,
+                   fn ->
+                     AshAi.Page.ensure_unique_names!([
+                       %AshAi.Tool{name: AshAi.Page.tool_name(CounterPage, :_close)},
+                       %AshAi.Tool{name: AshAi.Page.close_tool_name(CounterPage)}
+                     ])
+                   end
+    end
+
+    test "a close tool name clashes like any page tool" do
+      tools = [%AshAi.Tool{name: :counter_page__close}, %AshAi.Tool{name: :counter_page__close}]
+
+      assert_raise ArgumentError,
+                   ~r/clash with other tools of this server: counter_page__close/,
                    fn -> AshAi.Page.ensure_unique_names!(tools) end
     end
 

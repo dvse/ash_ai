@@ -71,6 +71,13 @@ defmodule AshAi.Test.Page.CounterPage do
       upsert_fields []
     end
 
+    # A page action named `close`: its tool, `counter_page_close`, is not the view's close tool
+    # (`counter_page__close`).
+    update :close do
+      require_atomic? false
+      change set_attribute(:count, 0)
+    end
+
     update :increment do
       require_atomic? false
       argument :by, :integer, default: 1, public?: true
@@ -106,7 +113,8 @@ defmodule AshAi.Test.Page.Adapter do
        "<!doctype html><title>#{info.title}</title><main data-page=\"#{inspect(page)}\"></main>"}
 
   @impl true
-  def actions(CounterPage), do: [{CounterPage, :increment}, {Item, :toggle}]
+  def actions(CounterPage),
+    do: [{CounterPage, :increment}, {CounterPage, :close}, {Item, :toggle}]
 
   @impl true
   def session(_page, session_id),

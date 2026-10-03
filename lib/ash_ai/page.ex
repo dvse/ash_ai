@@ -35,7 +35,7 @@ defmodule AshAi.Page do
       to the framework, as `:presentation` of the scope (`c:mount/3`, `c:render/3`) and of the
       call (`c:run/4`), nil when absent. A render may answer the handle to use next as its
       frame's `"presentation"`, which reaches the view unchanged in `_meta["ash_ai/page"]`. One
-      more app-only tool per page, `<open tool>_close`, takes `presentation` (required) and calls
+      more app-only tool per page, `<open tool>__close`, takes `presentation` (required) and calls
       the framework's optional `c:close/3`, answering "Done.".
 
   The framework is found through the page resource's Spark extensions: the first extension that
@@ -208,8 +208,12 @@ defmodule AshAi.Page do
   def open_tool_name(page),
     do: page |> Module.split() |> List.last() |> Macro.underscore() |> String.to_atom()
 
-  @doc "The tool name of a page's close tool: its open tool's name with `_close`."
-  def close_tool_name(page), do: String.to_atom("#{open_tool_name(page)}_close")
+  @doc """
+  The tool name of a page's close tool: its open tool's name with `__close`. A page action's tool
+  is `<page>_<action>`, so a page's own `close` action keeps `<page>_close`; only an action whose
+  snake-cased name is `_close` would clash, and `ensure_unique_names!/1` refuses that.
+  """
+  def close_tool_name(page), do: String.to_atom("#{open_tool_name(page)}__close")
 
   @doc """
   The `presentation` argument's JSON schema: an optional string of at most 128 characters, the
