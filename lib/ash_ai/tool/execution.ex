@@ -110,9 +110,11 @@ defmodule AshAi.Tool.Execution do
   end
 
   @doc """
-  The errors of building the tool's action input from a call's arguments without running it
+  The errors of building the tool's action input from a call's arguments before running it
   (BLENDED-023): the changeset, query or action input `run/4` would run, built with the call's
-  actor, tenant and context. An update or destroy is built over an unloaded record of the
+  actor, tenant and context. Building runs the action's `change/3` bodies and validations (a
+  read's `prepare/3` bodies), as the run builds it again; the data layer, after-action hooks, a
+  generic action's `run` and notifications are not reached. An update or destroy is built over an unloaded record of the
   resource, as no record is read. Returns `{:ok, errors}`, or `:error` when the call does not
   reach the build (`input` is not an object, an unknown input) or the build raises.
   """

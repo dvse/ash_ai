@@ -15,6 +15,7 @@ defmodule AshAi.Blended.ElicitationTest do
   alias AshAi.Test.Elicitation.{Endpoint, Order, Part}
 
   @alice %{name: "alice"}
+  @bob %{name: "bob"}
   @standard %{"elicitation" => %{}}
   @openai %{"extensions" => %{"openai/elicitation" => %{"form" => %{}}}}
   @tools [
@@ -39,7 +40,12 @@ defmodule AshAi.Blended.ElicitationTest do
           {"p1", "Hex bolt", "data:image/png;base64,iVBORw0KGgo=", "alice"},
           {"p2", "Washer", "https://example.com/washer.png", "alice"},
           {"p3", "Nut", nil, "alice"},
-          {"b1", "Gear", "https://example.com/gear.png", "bob"}
+          {"b1", "Gear", "https://example.com/gear.png", "bob"},
+          {"d1", "Plain", "http://example.com/plain.png", "dave"},
+          {"d2", "Script", "javascript:alert(1)", "dave"},
+          {"d3", "Text", "data:text/plain;base64,aGk=", "dave"},
+          {"d4", "Inline svg", "data:image/svg+xml,<svg/>", "dave"},
+          {"d5", "Secure", "https://example.com/secure.png", "dave"}
         ] do
       Ash.create!(Part, %{id: id, name: name, preview: preview, owner: owner, secret: "s"})
     end
@@ -468,6 +474,71 @@ defmodule AshAi.Blended.ElicitationTest do
       assert %{"result" => %{"isError" => true}} = legacy_call(session, "place_order", %{}).body
     end
 
+    test "only the caller whose call waits may answer it" do
+      session = initialize(@standard)
+      task = Task.async(fn -> legacy_call(session, "place_order", %{}) end)
+      [request_id] = pending(session)
+
+      answer = %{"action" => "accept", "content" => %{"part" => "bolt", "quantity" => 2}}
+
+      stolen =
+        post(session, %{"jsonrpc" => "2.0", "id" => request_id, "result" => answer}, [], @bob)
+
+      assert stolen.status == 200
+      assert %{"error" => %{"code" => -32_600}} = Jason.decode!(stolen.resp_body)
+      assert pending(session) == [request_id]
+
+      assert answer(session, request_id, answer) == 202
+      assert [_request, %{"result" => %{"isError" => false}}] = events(Task.await(task).body)
+      assert rows() == 1
+    end
+
+    test "a session is kept only when a tool elicits, and only under an id the server minted" do
+      count = AshAi.Mcp.Elicitations.session_count()
+      plain = initialize(@standard, tools: [:place_order_plain])
+      assert AshAi.Mcp.Elicitations.session_count() == count
+      assert AshAi.Mcp.Elicitations.session_dialect(plain, owner(@alice)) == nil
+
+      session = initialize(@standard)
+      assert AshAi.Mcp.Elicitations.session_dialect(session, owner(@alice)) == :standard
+      assert AshAi.Mcp.Elicitations.session_dialect(session, owner(@bob)) == nil
+
+      # An initialize that names an existing session (another caller's, or any) records nothing.
+      reinitialized = initialize(@openai, [], session, @bob)
+      assert reinitialized == session
+      assert AshAi.Mcp.Elicitations.session_dialect(session, owner(@alice)) == :standard
+      assert AshAi.Mcp.Elicitations.session_dialect(session, owner(@bob)) == nil
+
+      chosen = initialize(@standard, [], "client-chosen")
+      assert chosen == "client-chosen"
+      assert AshAi.Mcp.Elicitations.session_dialect(chosen, owner(@alice)) == nil
+      assert legacy_call(chosen, "place_order", %{}).content_type == ["application/json"]
+
+      # Another caller's calls in the session are not streamed.
+      response = legacy_call(session, "place_order", %{}, [], @bob)
+      assert response.content_type == ["application/json"]
+    end
+
+    test "an unused session expires, and the store keeps at most its limit" do
+      session = initialize(@standard)
+      Process.sleep(5)
+
+      response = legacy_call(session, "place_order", %{}, elicitation_session_ttl_ms: 1)
+      assert response.content_type == ["application/json"]
+      assert AshAi.Mcp.Elicitations.session_dialect(session, owner(@alice)) == nil
+
+      sessions =
+        for _ <- 1..3 do
+          Process.sleep(2)
+          initialize(@standard, elicitation_session_limit: 2)
+        end
+
+      assert AshAi.Mcp.Elicitations.session_count() == 2
+
+      assert Enum.map(sessions, &AshAi.Mcp.Elicitations.session_dialect(&1, owner(@alice))) ==
+               [nil, :standard, :standard]
+    end
+
     test "an answer nobody waits on is handled as upstream handles it" do
       session = initialize(@standard)
 
@@ -585,6 +656,57 @@ defmodule AshAi.Blended.ElicitationTest do
              }
     end
 
+    test "an answer outside the caller's choices is asked again; the action does not run" do
+      assert %{"inputRequests" => %{"missing_input" => %{"params" => params}}} =
+               call("order_part", %{}, @openai, %{"inputResponses" => accept(%{"part" => "b1"})})
+
+      assert params["message"] ==
+               "order_part needs more input.\npart: is not one of the choices offered"
+
+      part = params["requestedSchema"]["properties"]["part"]
+      refute Map.has_key?(part, "default")
+      assert Enum.map(part["oneOf"], & &1["const"]) == ["p1", "p2", "p3"]
+      assert params["requestedSchema"]["required"] == ["part"]
+
+      assert %{"inputRequests" => %{"missing_input" => %{"params" => params}}} =
+               call(
+                 "order_part",
+                 %{"input" => %{"part" => "p1"}},
+                 @standard,
+                 %{"inputResponses" => accept(%{"extras" => ["p2", "b1"]})}
+               )
+
+      assert params["message"] =~ "extras: is not one of the choices offered"
+      assert rows() == 0
+
+      assert %{"isError" => false, "structuredContent" => %{"part" => "p1"}} =
+               call(
+                 "order_part",
+                 %{"input" => %{"part" => "p1"}},
+                 @standard,
+                 %{"inputResponses" => accept(%{"extras" => ["p2", "p3"]})}
+               )
+
+      assert rows() == 1
+    end
+
+    test "a thumbnail is only an HTTPS URL or a base64 image data URL" do
+      assert %{"inputRequests" => %{"missing_input" => %{"params" => params}}} =
+               call("order_part", %{}, @openai, %{}, %{name: "dave"})
+
+      assert params["requestedSchema"]["properties"]["part"]["oneOf"] == [
+               %{"const" => "d1", "title" => "Plain"},
+               %{"const" => "d2", "title" => "Script"},
+               %{"const" => "d3", "title" => "Text"},
+               %{"const" => "d4", "title" => "Inline svg"},
+               %{
+                 "const" => "d5",
+                 "title" => "Secure",
+                 "x-openai-thumbnail" => %{"src" => "https://example.com/secure.png"}
+               }
+             ]
+    end
+
     test "a chosen answer runs the action once" do
       assert %{"isError" => false, "structuredContent" => %{"part" => "p2"}} =
                call("order_part", %{}, @openai, %{"inputResponses" => accept(%{"part" => "p2"})})
@@ -657,20 +779,27 @@ defmodule AshAi.Blended.ElicitationTest do
     |> then(&Jason.decode!(&1.resp_body))
   end
 
-  defp initialize(capabilities) do
+  defp initialize(capabilities, opts \\ [], session \\ nil, actor \\ @alice) do
     conn =
-      post(nil, %{
-        "jsonrpc" => "2.0",
-        "id" => 0,
-        "method" => "initialize",
-        "params" => %{"protocolVersion" => "2025-06-18", "capabilities" => capabilities}
-      })
+      post(
+        session,
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 0,
+          "method" => "initialize",
+          "params" => %{"protocolVersion" => "2025-06-18", "capabilities" => capabilities}
+        },
+        opts,
+        actor
+      )
 
     [session] = Plug.Conn.get_resp_header(conn, "mcp-session-id")
     session
   end
 
-  defp legacy_call(session, name, arguments, opts \\ []) do
+  defp owner(actor), do: AshAi.Mcp.Elicitations.owner(actor)
+
+  defp legacy_call(session, name, arguments, opts \\ [], actor \\ @alice) do
     conn =
       post(
         session,
@@ -680,7 +809,8 @@ defmodule AshAi.Blended.ElicitationTest do
           "method" => "tools/call",
           "params" => %{"name" => name, "arguments" => arguments}
         },
-        opts
+        opts,
+        actor
       )
 
     content_type = Plug.Conn.get_resp_header(conn, "content-type")
@@ -697,11 +827,11 @@ defmodule AshAi.Blended.ElicitationTest do
     post(session, %{"jsonrpc" => "2.0", "id" => request_id, "result" => result}).status
   end
 
-  defp post(session, body, opts \\ []) do
+  defp post(session, body, opts \\ [], actor \\ @alice) do
     Plug.Test.conn(:post, "/", body)
     |> Plug.Conn.put_req_header("accept", "application/json, text/event-stream")
     |> then(&if(session, do: Plug.Conn.put_req_header(&1, "mcp-session-id", session), else: &1))
-    |> Ash.PlugHelpers.set_actor(@alice)
+    |> Ash.PlugHelpers.set_actor(actor)
     |> AshAi.Mcp.Router.call(router_opts(opts))
   end
 

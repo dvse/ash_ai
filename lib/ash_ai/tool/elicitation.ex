@@ -6,14 +6,20 @@ defmodule AshAi.Tool.Elicitation do
   @moduledoc """
   Missing input of an MCP tool call, asked of the user as a form (BLENDED-023).
 
-  A tool declared with `elicit_missing?: true` builds its action's input first, without running
-  it (`AshAi.Tool.Execution.input_errors/3`). When every error is a missing or invalid value of
+  A tool declared with `elicit_missing?: true` builds its action's input first, before running
+  it (`AshAi.Tool.Execution.input_errors/3`). Building is not a dry run: the action's
+  `change/3` bodies and validations (a read's `prepare/3` bodies) run during the check, so a
+  call that then runs runs them twice, and once more per form round; the data layer,
+  after-action hooks, a generic action's `run` and notifications are not reached. When every
+  error is a missing or invalid value of
   an input the tool's schema declares (`Ash.Error.Changes.Required`, `Ash.Error.Query.Required`,
   `Ash.Error.Changes.InvalidArgument`, `Ash.Error.Query.InvalidArgument`,
   `Ash.Error.Action.InvalidArgument`), the server answers with a form elicitation request whose
   `requestedSchema` describes exactly those inputs, instead of running the action. The client
   calls the tool again with the answers; the call is validated again and, once valid, the action
-  runs once, as any call does. Nothing is kept between the two calls.
+  runs once, as any call does. An answer for an input with `argument_choices` (BLENDED-024) must
+  be one of the choices listed for the caller, or it is asked again. Nothing is kept between the
+  two calls.
 
   The request is the MCP form elicitation `elicitation/create` (MCP 2025-06-18 and 2025-11-25
   `ElicitRequestFormParams`, 2026-07-28 embedded in an `InputRequiredResult`), or
@@ -105,10 +111,13 @@ defmodule AshAi.Tool.Elicitation do
   """
   def decide(%Tool{elicit_missing?: true} = tool, arguments, context, dialect, answered)
       when dialect in [:openai, :standard] do
-    with {:ok, [_ | _] = errors} <- Execution.input_errors(tool, arguments, context),
+    with {:ok, errors} <- Execution.input_errors(tool, arguments, context),
+         outside = outside_choices(tool, answered, context),
+         [_ | _] = errors <- errors ++ outside,
          {:ok, fields} <- elicitable_fields(tool, errors),
+         kept = Map.drop(answered, Enum.map(outside, &to_string(&1.field))),
          {:ok, schema} <-
-           requested_schema(tool, fields, missing(errors), answered, dialect, context) do
+           requested_schema(tool, fields, missing(errors), kept, dialect, context) do
       {:input_required,
        %{
          "method" => method(dialect),
@@ -124,6 +133,36 @@ defmodule AshAi.Tool.Elicitation do
   end
 
   def decide(_tool, _arguments, _context, _dialect, _answered), do: :run
+
+  # BLENDED-024: an answer for an input with `argument_choices` must be one of the choices listed
+  # for the caller (each item, for a multi-select): the form offers only those, so any other
+  # value did not come from it. Such an answer is asked again, with this error and without its
+  # value as the default.
+  defp outside_choices(tool, answered, context) when map_size(answered) > 0 do
+    for {name, choices} <- argument_choices(tool),
+        Map.has_key?(answered, to_string(name)),
+        value = Map.get(answered, to_string(name)),
+        not is_nil(value),
+        not offered?(value, choices, context) do
+      Ash.Error.Action.InvalidArgument.exception(
+        field: name,
+        message: "is not one of the choices offered"
+      )
+    end
+  end
+
+  defp outside_choices(_tool, _answered, _context), do: []
+
+  defp offered?(value, choices, context) do
+    offered = choices |> list_choices(:standard, context) |> MapSet.new(& &1["const"])
+    values = List.wrap(value)
+
+    values != [] and
+      Enum.all?(values, fn item ->
+        (is_binary(item) or is_number(item) or is_boolean(item)) and
+          MapSet.member?(offered, to_string(item))
+      end)
+  end
 
   # Every error is a missing or invalid value of an input the tool's schema declares.
   defp elicitable_fields(%Tool{resource: resource, action: action} = tool, errors) do
@@ -371,7 +410,8 @@ defmodule AshAi.Tool.Elicitation do
   # context, through the resource's policies), as titled `const` options. A row without a value
   # is not offered. A forbidden listing offers nothing; any other listing error is logged and
   # offers nothing. In the OpenAI dialect an option carries its row's thumbnail as
-  # `x-openai-thumbnail` (an MCP `Icon`; a `data:` URL's media type is its `mimeType`).
+  # `x-openai-thumbnail` (an MCP `Icon`; a `data:image/…;base64,` URL's media type is its
+  # `mimeType`), when the value is an HTTPS or base64 image data URL.
   defp list_choices(choices, dialect, context) do
     choices.resource
     |> Ash.Query.for_read(choices.action.name, %{},
@@ -423,14 +463,20 @@ defmodule AshAi.Tool.Elicitation do
     end
   end
 
+  # Only an HTTPS URL or a base64 `data:image/…` URL is a thumbnail (the spec's two forms); any
+  # other value (another scheme, a non-image or non-base64 data URL) is left out.
   defp put_thumbnail(option, :openai, src) when is_binary(src) do
-    icon =
-      case Regex.run(~r/\Adata:([^;,]+)[;,]/, src) do
-        [_match, mime_type] -> %{"src" => src, "mimeType" => mime_type}
-        nil -> %{"src" => src}
-      end
+    cond do
+      String.starts_with?(src, "https:") ->
+        Map.put(option, "x-openai-thumbnail", %{"src" => src})
 
-    Map.put(option, "x-openai-thumbnail", icon)
+      match = Regex.run(~r/\Adata:(image\/[^;,]+);base64,/, src) ->
+        [_match, mime_type] = match
+        Map.put(option, "x-openai-thumbnail", %{"src" => src, "mimeType" => mime_type})
+
+      true ->
+        option
+    end
   end
 
   defp put_thumbnail(option, _dialect, _src), do: option

@@ -94,7 +94,7 @@ defmodule AshAi.Mcp.Server do
   defp handle_initialize_based_post(conn, body, session_id, opts) do
     # BLENDED-023: a client's answer to a server request a streaming call waits on.
     if elicitation_answer?(body) and
-         AshAi.Mcp.Elicitations.deliver(session_id, body) == :ok do
+         AshAi.Mcp.Elicitations.deliver(session_id, elicitation_owner(opts), body) == :ok do
       Plug.Conn.send_resp(conn, 202, "")
     else
       handle_initialize_based_message(conn, body, session_id, opts)
@@ -109,11 +109,16 @@ defmodule AshAi.Mcp.Server do
         stream_elicitation(conn, id, params, request, session_id, opts)
 
       {:initialize_response, response, new_session_id} ->
-        # BLENDED-023: a client that can be asked for input over a stream is remembered.
-        if streaming?(conn) do
+        # BLENDED-023: a client that can be asked for input over a stream is remembered, under
+        # the session id the server minted and for its caller, when a tool elicits.
+        dialect = body |> initialize_capabilities() |> Elicitation.dialect()
+
+        if dialect && streaming?(conn) && is_nil(session_id) && elicits?(opts) do
           AshAi.Mcp.Elicitations.put_session(
             new_session_id,
-            body |> initialize_capabilities() |> Elicitation.dialect()
+            dialect,
+            elicitation_owner(opts),
+            opts
           )
         end
 
@@ -157,7 +162,7 @@ defmodule AshAi.Mcp.Server do
   defp legacy_elicitation_opts(conn, %{"method" => "tools/call"}, session_id, opts) do
     with true <- streaming?(conn),
          dialect when not is_nil(dialect) <-
-           AshAi.Mcp.Elicitations.session_dialect(session_id) do
+           AshAi.Mcp.Elicitations.session_dialect(session_id, elicitation_owner(opts), opts) do
       Keyword.put(opts, :elicitation, %{dialect: dialect, responses: nil})
     else
       _ -> opts
@@ -165,6 +170,25 @@ defmodule AshAi.Mcp.Server do
   end
 
   defp legacy_elicitation_opts(_conn, _body, _session_id, opts), do: opts
+
+  defp elicitation_owner(opts), do: AshAi.Mcp.Elicitations.owner(opts[:actor])
+
+  # Whether a tool this server exposes to the caller elicits missing input. A server whose tool
+  # exposure raises (an `actions` option naming actions no tool exposes, which only `tools/list`
+  # would report) has none; its `initialize` still answers.
+  defp elicits?(opts) do
+    opts
+    |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions, :mcp_resources])
+    |> Keyword.update(
+      :context,
+      %{otp_app: opts[:otp_app]},
+      &Map.put(&1, :otp_app, opts[:otp_app])
+    )
+    |> AshAi.exposed_tools()
+    |> Enum.any?(& &1.elicit_missing?)
+  rescue
+    _error -> false
+  end
 
   defp initialize_capabilities(%{"method" => "initialize", "params" => %{} = params}),
     do: params["capabilities"]
@@ -196,7 +220,7 @@ defmodule AshAi.Mcp.Server do
 
   defp elicitation_round(conn, id, params, request, session_id, opts) do
     request_id = @elicitation_request_prefix <> Ash.UUIDv7.generate()
-    :ok = AshAi.Mcp.Elicitations.await(session_id, request_id)
+    :ok = AshAi.Mcp.Elicitations.await(session_id, request_id, elicitation_owner(opts))
 
     conn =
       send_sse_event(
@@ -218,13 +242,15 @@ defmodule AshAi.Mcp.Server do
       case answer do
         %{"result" => result} ->
           Keyword.put(opts, :elicitation, %{
-            dialect: AshAi.Mcp.Elicitations.session_dialect(session_id),
+            dialect:
+              AshAi.Mcp.Elicitations.session_dialect(session_id, elicitation_owner(opts), opts),
             responses: %{Elicitation.input_key() => result}
           })
 
         :timeout ->
           Keyword.put(opts, :elicitation, %{
-            dialect: AshAi.Mcp.Elicitations.session_dialect(session_id),
+            dialect:
+              AshAi.Mcp.Elicitations.session_dialect(session_id, elicitation_owner(opts), opts),
             responses: %{Elicitation.input_key() => %{"action" => "cancel"}}
           })
 
