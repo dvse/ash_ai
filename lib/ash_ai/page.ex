@@ -25,6 +25,18 @@ defmodule AshAi.Page do
       a call is derived from the caller's actor and the page (`session_id/2`), never taken from
       the caller, and handed to the framework (`c:session/2`) as the Ash context and the inputs it
       owns. A call without an actor is refused.
+    * **A view holds a live presentation, as a browser tab does.** Every generated tool (the
+      open tool and each bound action's) declares an optional top-level argument `presentation`
+      beside `input` (a string of at most 128 characters): the opaque handle of the view's live
+      presentation on the server, as the page last returned it. Strict hosts forward only a
+      tool's name and declared arguments, so the handle travels in a declared argument. It is
+      never a credential (the session still comes from the caller's actor) and never reaches the
+      action: it is taken out of the arguments before the session's inputs are filled and given
+      to the framework, as `:presentation` of the scope (`c:mount/3`, `c:render/3`) and of the
+      call (`c:run/4`), nil when absent. A render may answer the handle to use next as its
+      frame's `"presentation"`, which reaches the view unchanged in `_meta["ash_ai/page"]`. One
+      more app-only tool per page, `<open tool>_close`, takes `presentation` (required) and calls
+      the framework's optional `c:close/3`, answering "Done.".
 
   The framework is found through the page resource's Spark extensions: the first extension that
   exports `mcp_page_adapter/0` names the module implementing this behaviour. AshAi depends on no
@@ -37,7 +49,8 @@ defmodule AshAi.Page do
     * `:actor`, `:tenant`, `:context` — the request's, with the session's context merged in;
     * `:params` — mount parameters (the linked tool's input fields, by name);
     * `:errors` — error texts of the call that preceded the render;
-    * `:resource` — the `%AshAi.McpUiResource{}`.
+    * `:resource` — the `%AshAi.McpUiResource{}`;
+    * `:presentation` — the view's live presentation handle the call carried, or nil.
   """
   @type scope :: %{
           required(:actor) => term(),
@@ -45,7 +58,8 @@ defmodule AshAi.Page do
           required(:context) => map(),
           required(:params) => map(),
           required(:errors) => [String.t()],
-          required(:resource) => AshAi.McpUiResource.t()
+          required(:resource) => AshAi.McpUiResource.t(),
+          required(:presentation) => String.t() | nil
         }
 
   @typedoc """
@@ -85,7 +99,8 @@ defmodule AshAi.Page do
 
   @doc """
   Mount (idempotently) and render the page for a session. `{:ok, frame}` where `frame` is a JSON
-  map the template applies, with `"bindings"` as `%{key => binding}`.
+  map the template applies, with `"bindings"` as `%{key => binding}`. The frame may carry
+  `"presentation"`, the handle the view passes on its next calls; it reaches the view unchanged.
   """
   @callback render(page :: module(), session_id :: String.t(), scope()) ::
               {:ok, map()} | {:error, String.t()}
@@ -102,15 +117,26 @@ defmodule AshAi.Page do
   whose page rows are reachable only through its dispatch boundary (a session key the caller may
   not filter by) answers here; one that leaves page actions to ordinary tool execution leaves it
   out. `call` names the tool's `resource`, `action` and its `arguments` (upstream's tool argument
-  shape: `"input"` and top-level identity values). `:ok` or `{:error, text}`.
+  shape: `"input"` and top-level identity values), and the view's `presentation` (or nil).
+  `:ok` or `{:error, text}`.
   """
   @callback run(page :: module(), session_id :: String.t(), call :: map(), scope()) ::
               :ok | {:error, String.t()}
 
-  @optional_callbacks mount: 3, run: 4
+  @doc """
+  Close a view's live presentation of a session (optional), when the view's close tool is
+  called. Without it the close tool answers "Done." and does nothing.
+  """
+  @callback close(page :: module(), session_id :: String.t(), presentation :: String.t()) ::
+              :ok | {:error, String.t()}
+
+  @optional_callbacks mount: 3, run: 4, close: 3
 
   @meta_key "ash_ai/page"
   @visibility_app %{"visibility" => ["app"]}
+  @presentation "presentation"
+  @presentation_max_length 128
+  @presentation_description "The view's live presentation, as the page last returned it."
 
   @doc "The result `_meta` key that carries the page."
   def meta_key, do: @meta_key
@@ -182,9 +208,48 @@ defmodule AshAi.Page do
   def open_tool_name(page),
     do: page |> Module.split() |> List.last() |> Macro.underscore() |> String.to_atom()
 
+  @doc "The tool name of a page's close tool: its open tool's name with `_close`."
+  def close_tool_name(page), do: String.to_atom("#{open_tool_name(page)}_close")
+
+  @doc """
+  The `presentation` argument's JSON schema: an optional string of at most 128 characters, the
+  view's live presentation handle. In strict mode (every property required) it is nullable.
+  """
+  def presentation_schema(strict? \\ false) do
+    %{
+      "type" => if(strict?, do: ["string", "null"], else: "string"),
+      "maxLength" => @presentation_max_length,
+      "description" => @presentation_description
+    }
+  end
+
+  @doc "Adds `presentation` to a generated tool's input schema, beside `input`."
+  def put_presentation(%{"properties" => %{} = properties} = schema, strict?) do
+    schema
+    |> Map.put("properties", Map.put(properties, @presentation, presentation_schema(strict?)))
+    |> then(fn schema ->
+      if strict?,
+        do: Map.update(schema, "required", [@presentation], &(&1 ++ [@presentation])),
+        else: schema
+    end)
+  end
+
+  def put_presentation(schema, _strict?), do: schema
+
+  @doc "The close tool's input schema: `presentation`, required."
+  def close_input_schema(strict? \\ false) do
+    %{
+      "type" => "object",
+      "properties" => %{@presentation => presentation_schema(false)},
+      "required" => [@presentation]
+    }
+    |> then(&if(strict?, do: Map.put(&1, "additionalProperties", false), else: &1))
+  end
+
   @doc """
   The generated tools of the page views `ui_resources`: one open tool per page (the page's
-  `:mount` create), one per bound action. Each is an ordinary `%AshAi.Tool{}`.
+  `:mount` create), its close tool, one per bound action. Each is an ordinary `%AshAi.Tool{}`
+  (the close tool's is the open tool's, renamed; it runs no action).
   """
   def tools(ui_resources) do
     ui_resources
@@ -195,6 +260,12 @@ defmodule AshAi.Page do
 
       open = tool(resource.page, :mount, open_tool_name(resource.page), meta, resource)
 
+      close = %{
+        open
+        | name: close_tool_name(resource.page),
+          description: "Closes the #{resource.name} view's live presentation."
+      }
+
       actions =
         resource.page
         |> adapter.actions()
@@ -203,7 +274,7 @@ defmodule AshAi.Page do
           tool(res, action, tool_name(res, action), meta, resource)
         end)
 
-      [open | actions]
+      [open, close | actions]
     end)
   end
 
@@ -237,10 +308,43 @@ defmodule AshAi.Page do
   end
 
   @doc """
-  Prepares a call of a page tool: the session, the context and the arguments with the session's
-  inputs filled. `{:ok, call}` or `{:error, text}`.
+  Prepares a call of a page tool: the session, the context, the view's `presentation` (a
+  generated tool's declared argument, taken out of the arguments; nil for the author's tool) and
+  the arguments with the session's inputs filled. `{:ok, call}` or `{:error, text}`.
   """
   def prepare(%AshAi.Tool{} = tool, arguments, context, %AshAi.McpUiResource{} = view) do
+    case presentation(tool, arguments, view) do
+      {:ok, presentation} ->
+        prepare(tool, Map.delete(arguments, @presentation), context, view, presentation)
+
+      :none ->
+        prepare(tool, arguments, context, view, nil)
+
+      :error ->
+        {:error,
+         "presentation must be a string of at most #{@presentation_max_length} characters."}
+    end
+  end
+
+  # A generated tool declares `presentation`; the author's tool does not, and its arguments are
+  # left as they are.
+  defp presentation(tool, arguments, view) do
+    if generated?(tool, view) do
+      case Map.get(arguments, @presentation) do
+        nil -> {:ok, nil}
+        value when is_binary(value) -> valid_presentation(value)
+        _other -> :error
+      end
+    else
+      :none
+    end
+  end
+
+  defp valid_presentation(value) do
+    if String.length(value) <= @presentation_max_length, do: {:ok, value}, else: :error
+  end
+
+  defp prepare(tool, arguments, context, view, presentation) do
     case session_id(context[:actor], view.page) do
       nil ->
         # The author's own tool keeps working for an anonymous caller, without the page; the
@@ -256,7 +360,14 @@ defmodule AshAi.Page do
         context = Map.update(context, :context, session_context, &Map.merge(&1, session_context))
         arguments = fill_session_inputs(tool, arguments, inputs, view.page)
 
-        {:ok, %{session: session, adapter: adapter, context: context, arguments: arguments}}
+        {:ok,
+         %{
+           session: session,
+           adapter: adapter,
+           context: context,
+           arguments: arguments,
+           presentation: presentation
+         }}
     end
   end
 
@@ -278,7 +389,10 @@ defmodule AshAi.Page do
 
   defp fill_session_inputs(_tool, arguments, _inputs, _page), do: arguments
 
-  @doc "Whether a tool is one of a page view's generated tools (its open tool or a bound action)."
+  @doc """
+  Whether a tool is one of a page view's generated tools (its open or close tool, or a bound
+  action).
+  """
   def generated?(
         %AshAi.Tool{_meta: %{"ui" => %{"visibility" => ["app"], "resourceUri" => uri}}} = tool,
         %AshAi.McpUiResource{uri: uri, page: page}
@@ -333,7 +447,12 @@ defmodule AshAi.Page do
   def run(%AshAi.Tool{} = tool, call, view, tool_arguments) do
     if function_exported?(call.adapter, :run, 4) and
          {tool.resource, tool.action.name} in call.adapter.actions(view.page) do
-      action = %{resource: tool.resource, action: tool.action.name, arguments: call.arguments}
+      action = %{
+        resource: tool.resource,
+        action: tool.action.name,
+        arguments: call.arguments,
+        presentation: call.presentation
+      }
 
       case call.adapter.run(
              view.page,
@@ -372,6 +491,41 @@ defmodule AshAi.Page do
 
   def ensure_mounted(_tool, _call, _view, _tool_arguments), do: :ok
 
+  @doc "Whether a tool is a page view's close tool."
+  def close_tool?(
+        %AshAi.Tool{resource: page, name: name, _meta: %{"ui" => %{"visibility" => ["app"]}}},
+        %AshAi.McpUiResource{page: page}
+      ),
+      do: name == close_tool_name(page)
+
+  def close_tool?(_tool, _view), do: false
+
+  @doc """
+  Answers a call of a view's close tool: the framework's `c:close/3` for the call's
+  presentation (required), then "Done."; without the callback, "Done." alone.
+  """
+  def close(call, view) do
+    cond do
+      is_nil(call.presentation) ->
+        error_result("presentation is required.")
+
+      function_exported?(call.adapter, :close, 3) ->
+        case call.adapter.close(view.page, call.session, call.presentation) do
+          :ok -> done_result()
+          {:error, text} -> error_result(text)
+        end
+
+      true ->
+        done_result()
+    end
+  end
+
+  defp done_result,
+    do: %{"isError" => false, "content" => [%{"type" => "text", "text" => "Done."}]}
+
+  defp error_result(text),
+    do: %{"isError" => true, "content" => [%{"type" => "text", "text" => text}]}
+
   defp scope(call, view, tool_arguments, errors) do
     %{
       actor: call.context[:actor],
@@ -379,7 +533,8 @@ defmodule AshAi.Page do
       context: call.context[:context] || %{},
       params: mount_params(tool_arguments),
       errors: errors,
-      resource: view
+      resource: view,
+      presentation: call[:presentation]
     }
   end
 
@@ -401,6 +556,7 @@ defmodule AshAi.Page do
     end
   end
 
+  # `presentation` is the view's handle, not a mount parameter.
   defp mount_params(arguments) do
     arguments
     |> Map.get("input", %{})
@@ -408,7 +564,7 @@ defmodule AshAi.Page do
       %{} = input -> input
       _other -> %{}
     end
-    |> Map.merge(Map.drop(arguments, ["input"]))
+    |> Map.merge(Map.drop(arguments, ["input", @presentation]))
   end
 
   defp tool_bindings(bindings, _ui_resources) do

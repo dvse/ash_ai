@@ -76,6 +76,9 @@ defmodule AshAi.Test.Page.CounterPage do
       argument :by, :integer, default: 1, public?: true
 
       change fn changeset, context ->
+        # What the action was given, for the tests: the view's presentation never reaches it.
+        send(self(), {:increment_params, changeset.params})
+
         case Ash.Changeset.get_argument(changeset, :by) do
           by when by < 0 ->
             Ash.Changeset.add_error(changeset, field: :by, message: "must not be negative")
@@ -111,6 +114,8 @@ defmodule AshAi.Test.Page.Adapter do
 
   @impl true
   def mount(page, session_id, scope) do
+    send(self(), {:page_mount, scope.presentation})
+
     case do_mount(page, session_id, scope) do
       {:ok, _row} -> :ok
       {:error, error} -> {:error, Exception.message(error)}
@@ -126,8 +131,18 @@ defmodule AshAi.Test.Page.Adapter do
     |> Ash.create()
   end
 
+  # Closes a view's live presentation ("stuck" refuses, for the tests). A render answers the
+  # handle the view passes next ("next:<handle>", or "fresh" without one).
+  @impl true
+  def close(_page, session_id, presentation) do
+    send(self(), {:page_close, session_id, presentation})
+    if presentation == "stuck", do: {:error, "the presentation would not close"}, else: :ok
+  end
+
   @impl true
   def render(page, session_id, scope) do
+    send(self(), {:page_render, scope.presentation})
+
     with {:ok, row} <- do_mount(page, session_id, scope) do
       items = Ash.read!(Item)
 
@@ -159,7 +174,9 @@ defmodule AshAi.Test.Page.Adapter do
          "html" => "count=#{row.count} by=#{row.last_by} session=#{session_id}",
          "params" => scope.params,
          "errors" => scope.errors,
-         "bindings" => bindings
+         "bindings" => bindings,
+         "presentation" =>
+           if(scope.presentation, do: "next:" <> scope.presentation, else: "fresh")
        }}
     end
   end
@@ -219,7 +236,9 @@ defmodule AshAi.Test.Page.RunAdapter do
   def session(_page, _session_id), do: %{context: %{}, inputs: %{}}
 
   @impl true
-  def run(GuardedPage, session_id, %{action: :bump, arguments: arguments}, _scope) do
+  def run(GuardedPage, session_id, %{action: :bump, arguments: arguments} = call, scope) do
+    send(self(), {:page_run, call.presentation, scope.presentation, arguments})
+
     by = get_in(arguments, ["input", "count"]) || 1
 
     if by < 0 do

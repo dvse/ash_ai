@@ -101,7 +101,7 @@ defmodule AshAi.Blended.PageTest do
     test "the page's open tool and bound actions are app-only tools of the view" do
       tools = tools(@alice)
 
-      for name <- ["counter_page", "counter_page_increment", "item_toggle"] do
+      for name <- ["counter_page", "counter_page_close", "counter_page_increment", "item_toggle"] do
         tool = Map.fetch!(tools, name)
 
         assert tool["_meta"]["ui"] == %{
@@ -116,6 +116,81 @@ defmodule AshAi.Blended.PageTest do
     test "the page tools follow the served views, not the tools option" do
       assert Map.has_key?(tools(@alice, tools: [:list_items]), "counter_page_increment")
       refute Map.has_key?(tools(@alice, mcp_resources: [:static]), "counter_page_increment")
+    end
+
+    test "every generated tool declares the view's presentation beside input; others do not" do
+      tools = tools(@alice)
+      presentation = AshAi.Page.presentation_schema()
+
+      assert presentation == %{
+               "type" => "string",
+               "maxLength" => 128,
+               "description" => "The view's live presentation, as the page last returned it."
+             }
+
+      for name <- ["counter_page", "counter_page_increment", "item_toggle", "guarded_page_bump"] do
+        schema = tools[name]["inputSchema"]
+        assert schema["properties"]["presentation"] == presentation
+        refute "presentation" in (schema["required"] || [])
+      end
+
+      increment = tools["counter_page_increment"]["inputSchema"]["properties"]
+      assert Map.keys(increment) == ["input", "presentation"]
+      refute Map.has_key?(increment["input"]["properties"], "presentation")
+
+      for name <- ["show_counter", "list_items"] do
+        refute Map.has_key?(tools[name]["inputSchema"]["properties"], "presentation")
+      end
+    end
+
+    test "the close tool is app-only and takes the presentation alone" do
+      tools = tools(@alice)
+      close = tools["counter_page_close"]
+
+      assert close["_meta"]["ui"] == %{
+               "resourceUri" => "ui://counter/view",
+               "visibility" => ["app"]
+             }
+
+      assert close["inputSchema"] == %{
+               "type" => "object",
+               "properties" => %{"presentation" => AshAi.Page.presentation_schema()},
+               "required" => ["presentation"]
+             }
+
+      refute Map.has_key?(close, "outputSchema")
+      assert close["description"] == "Closes the counter view's live presentation."
+      assert tools["guarded_page_close"]["_meta"]["ui"]["resourceUri"] == "ui://guarded/view"
+      refute Map.has_key?(tools(@alice, mcp_resources: [:static]), "counter_page_close")
+    end
+
+    test "a server without page views lists exactly the tools it listed before them" do
+      golden =
+        "test/ash_ai/blended/tools_list_without_pages.json" |> File.read!() |> Jason.decode!()
+
+      blended =
+        raw_tools_list(
+          otp_app: :ash_ai,
+          actions: [
+            {AshAi.Test.Blended.Post, :*},
+            {AshAi.Test.Blended.Author, :*},
+            {AshAi.Test.Blended.Comment, :*}
+          ],
+          actor: %{admin: true}
+        )
+
+      assert blended == golden["blended"]
+
+      static =
+        raw_tools_list(
+          otp_app: :ash_ai,
+          actions: [{Item, :*}],
+          tools: [:list_items],
+          mcp_resources: [:static],
+          actor: %{id: "alice"}
+        )
+
+      assert static == golden["static_view_only"]
     end
 
     test "the session's inputs are not in a page tool's input schema" do
@@ -244,10 +319,121 @@ defmodule AshAi.Blended.PageTest do
       end
     end
 
+    test "the view's presentation reaches the framework, never the action" do
+      call("counter_page", %{"presentation" => "tab-1"}, @alice)
+      assert_received {:page_render, "tab-1"}
+
+      result =
+        call(
+          "counter_page_increment",
+          %{"presentation" => "tab-1", "input" => %{"by" => 2}},
+          @alice
+        )
+
+      refute result["isError"]
+      assert_received {:page_mount, "tab-1"}
+      assert_received {:increment_params, params}
+      refute Map.has_key?(params, "presentation")
+      refute Map.has_key?(params, :presentation)
+      assert_received {:page_render, "tab-1"}
+      assert result["_meta"]["ash_ai/page"]["presentation"] == "next:tab-1"
+      refute Map.has_key?(result["_meta"]["ash_ai/page"]["params"], "presentation")
+
+      bumped =
+        call(
+          "guarded_page_bump",
+          %{"presentation" => "tab-2", "input" => %{"count" => 1}},
+          @alice
+        )
+
+      refute bumped["isError"]
+      assert_received {:page_run, "tab-2", "tab-2", arguments}
+      refute Map.has_key?(arguments, "presentation")
+    end
+
+    test "without a presentation the framework is told nil, and the render answers one" do
+      result = call("counter_page", %{}, @alice)
+      assert_received {:page_render, nil}
+      assert result["_meta"]["ash_ai/page"]["presentation"] == "fresh"
+
+      call("show_counter", %{"presentation" => "ignored"}, @alice)
+      assert_received {:page_render, nil}
+    end
+
+    test "a presentation that is not a string of at most 128 characters is refused" do
+      for value <- [String.duplicate("x", 129), 7, %{"a" => 1}] do
+        result = call("counter_page_increment", %{"presentation" => value}, @alice)
+        assert result["isError"]
+
+        assert result["content"] == [
+                 %{
+                   "type" => "text",
+                   "text" => "presentation must be a string of at most 128 characters."
+                 }
+               ]
+
+        refute result["_meta"]
+      end
+
+      refute call("counter_page", %{"presentation" => String.duplicate("é", 128)}, @alice)[
+               "isError"
+             ]
+    end
+
+    test "the close tool closes the caller's presentation through the framework" do
+      session = AshAi.Page.session_id(@alice, CounterPage)
+      result = call("counter_page_close", %{"presentation" => "tab-1"}, @alice)
+
+      assert result == %{
+               "isError" => false,
+               "content" => [%{"type" => "text", "text" => "Done."}]
+             }
+
+      assert_received {:page_close, ^session, "tab-1"}
+      refute_received {:page_render, _}
+
+      refused = call("counter_page_close", %{"presentation" => "stuck"}, @alice)
+      assert refused["isError"]
+
+      assert refused["content"] == [
+               %{"type" => "text", "text" => "the presentation would not close"}
+             ]
+
+      assert_received {:page_close, ^session, "stuck"}
+
+      missing = call("counter_page_close", %{}, @alice)
+      assert missing["content"] == [%{"type" => "text", "text" => "presentation is required."}]
+      refute_received {:page_close, _, _}
+
+      assert call("counter_page_close", %{"presentation" => "tab-1"}, nil)["content"] == [
+               %{"type" => "text", "text" => "This view needs a signed-in user."}
+             ]
+    end
+
+    test "a framework without close/3 answers the close tool, doing nothing" do
+      assert call("guarded_page_close", %{"presentation" => "tab-1"}, @alice) ==
+               %{"isError" => false, "content" => [%{"type" => "text", "text" => "Done."}]}
+    end
+
+    test "a close tool name clashes like any page tool" do
+      tools = [%AshAi.Tool{name: :counter_page_close}, %AshAi.Tool{name: :counter_page_close}]
+
+      assert_raise ArgumentError,
+                   ~r/clash with other tools of this server: counter_page_close/,
+                   fn -> AshAi.Page.ensure_unique_names!(tools) end
+    end
+
     test "tools that are not the view's carry no page" do
       result = call("list_items", %{}, @alice)
       refute result["_meta"]["ash_ai/page"]
     end
+  end
+
+  defp raw_tools_list(opts) do
+    Plug.Test.conn(:post, "/", %{"jsonrpc" => "2.0", "method" => "tools/list", "id" => "list"})
+    |> Plug.Conn.put_req_header("accept", "application/json, text/event-stream")
+    |> AshAi.Mcp.Router.call(AshAi.Mcp.Router.init(opts))
+    |> Map.fetch!(:resp_body)
   end
 
   defp tools(actor, opts \\ []) do

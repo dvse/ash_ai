@@ -1203,18 +1203,18 @@ defmodule AshAi.Mcp.Server do
       # MCP schemas are advisory (no grammar-constrained sampling), so the
       # OpenAI strict transformation defaults off here.
       tool = with_server_options(tool, opts)
+      strict? = Keyword.get(opts, :strict, false)
+      view = AshAi.Page.view_of(tool, mcp_ui_resources(opts))
+      close? = AshAi.Page.close_tool?(tool, view)
 
       %{
         "name" => to_string(tool.name),
         "title" => Tool.title(tool),
         "description" => AshAi.Tools.description(tool),
-        "inputSchema" =>
-          tool
-          |> AshAi.Tools.parameter_schema(strict: Keyword.get(opts, :strict, false))
-          |> hide_session_inputs(tool, opts),
+        "inputSchema" => page_input_schema(tool, view, close?, strict?, opts),
         "annotations" => annotations_to_map(Tool.annotations(tool))
       }
-      |> put_if("outputSchema", AshAi.Tool.Schema.output_for_tool(tool))
+      |> put_if("outputSchema", if(!close?, do: AshAi.Tool.Schema.output_for_tool(tool)))
       |> put_meta(Map.merge(Tool.meta(tool), AshAi.Tool.OpenAi.file_params_meta(tool)))
       # BLENDED-024: a misdeclared `argument_choices` is refused when the tool is listed.
       |> tap(fn _definition -> Elicitation.argument_choices(tool) end)
@@ -1349,34 +1349,41 @@ defmodule AshAi.Mcp.Server do
         execute_found_tool(tool, tool_args, context, opts)
 
       {:ok, call} ->
-        {:ok, result} =
-          cond do
-            open_tool?(tool, view) ->
-              {:ok,
-               %{"isError" => false, "content" => [%{"type" => "text", "text" => "Opened."}]}}
-
-            (mounted = AshAi.Page.ensure_mounted(tool, call, view, tool_args)) != :ok ->
-              {:error, text} = mounted
-              {:ok, tool_error_result(text)}
-
-            true ->
-              case AshAi.Page.run(tool, call, view, tool_args) do
-                {:ok, result} -> {:ok, result}
-                :default -> execute_found_tool(tool, call.arguments, call.context, opts)
-              end
-          end
-
-        errors =
-          if result["isError"],
-            do: Enum.map(result["content"] || [], &(&1["text"] || "")),
-            else: []
-
-        {:ok,
-         AshAi.Page.put_render(result, call, view, tool_args, errors, mcp_ui_resources(opts))}
+        if AshAi.Page.close_tool?(tool, view) do
+          # The view's live presentation closes; there is no page to render after it.
+          {:ok, AshAi.Page.close(call, view)}
+        else
+          execute_prepared_page_tool(tool, view, tool_args, call, opts)
+        end
 
       {:error, error_text} ->
         {:ok, tool_error_result(error_text)}
     end
+  end
+
+  defp execute_prepared_page_tool(tool, view, tool_args, call, opts) do
+    {:ok, result} =
+      cond do
+        open_tool?(tool, view) ->
+          {:ok, %{"isError" => false, "content" => [%{"type" => "text", "text" => "Opened."}]}}
+
+        (mounted = AshAi.Page.ensure_mounted(tool, call, view, tool_args)) != :ok ->
+          {:error, text} = mounted
+          {:ok, tool_error_result(text)}
+
+        true ->
+          case AshAi.Page.run(tool, call, view, tool_args) do
+            {:ok, result} -> {:ok, result}
+            :default -> execute_found_tool(tool, call.arguments, call.context, opts)
+          end
+      end
+
+    errors =
+      if result["isError"],
+        do: Enum.map(result["content"] || [], &(&1["text"] || "")),
+        else: []
+
+    {:ok, AshAi.Page.put_render(result, call, view, tool_args, errors, mcp_ui_resources(opts))}
   end
 
   defp open_tool?(
@@ -1384,12 +1391,32 @@ defmodule AshAi.Mcp.Server do
            resource: page,
            action: %{name: :mount},
            _meta: %{"ui" => %{"visibility" => ["app"]}}
-         },
+         } = tool,
          %AshAi.McpUiResource{page: page}
        ),
-       do: true
+       do: tool.name == AshAi.Page.open_tool_name(page)
 
   defp open_tool?(_tool, _view), do: false
+
+  # BLENDED-020: a page view's generated tools declare the view's `presentation`; its close tool
+  # takes nothing else. Every other tool's schema is upstream's.
+  defp page_input_schema(tool, view, close?, strict?, opts) do
+    cond do
+      close? ->
+        AshAi.Page.close_input_schema(strict?)
+
+      view && AshAi.Page.generated?(tool, view) ->
+        tool
+        |> AshAi.Tools.parameter_schema(strict: strict?)
+        |> hide_session_inputs(tool, opts)
+        |> AshAi.Page.put_presentation(strict?)
+
+      true ->
+        tool
+        |> AshAi.Tools.parameter_schema(strict: strict?)
+        |> hide_session_inputs(tool, opts)
+    end
+  end
 
   defp hide_session_inputs(schema, tool, opts) do
     case AshAi.Page.view_of(tool, mcp_ui_resources(opts)) do
