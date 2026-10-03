@@ -564,7 +564,7 @@ defmodule AshAi.Dsl do
       type: :string,
       required: true,
       doc:
-        "An RFC 6570 level 1 URI template, e.g. `mcp://parts/{id}`. Every `{variable}` is a public attribute of the resource and an argument of the action."
+        "An RFC 6570 level 1 URI template, e.g. `mcp://parts/{id}`. Every `{variable}` is a public attribute of the resource and an argument of the action; a literal separates every two variables."
     ],
     resource: [type: {:spark, Ash.Resource}, required: true],
     action: [
@@ -576,7 +576,7 @@ defmodule AshAi.Dsl do
     list: [
       type: :atom,
       doc:
-        "The read action whose rows are the resources, for the caller. Defaults to the primary read action. `resources/read` reads the row through it too."
+        "The read action whose rows are the resources, for the caller. Defaults to the primary read action. Its pagination must have a `default_limit`: `resources/list` lists one page of that many rows. `resources/read` reads the row through it too."
     ],
     title: [
       type: :string,

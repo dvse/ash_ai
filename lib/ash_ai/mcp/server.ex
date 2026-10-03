@@ -1258,9 +1258,10 @@ defmodule AshAi.Mcp.Server do
     opts
     |> mcp_resource_templates()
     |> Enum.flat_map(fn template ->
+      # One page of the list action's `default_limit` rows (the verifier requires one).
       template.resource
       |> Ash.Query.for_read(template.list.name, %{}, row_ash_opts(opts))
-      |> Ash.read(domain: template.domain)
+      |> Ash.read(domain: template.domain, page: [limit: template.list.pagination.default_limit])
       |> case do
         {:ok, %{results: rows}} ->
           Enum.flat_map(rows, &row_resource_to_map(template, &1))

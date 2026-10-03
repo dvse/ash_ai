@@ -6,10 +6,11 @@ defmodule AshAi.Verifiers.VerifyMcpResourceTemplates do
   @moduledoc """
   Verifies `mcp_resource_template` entities (BLENDED-022).
 
-  The URI template is RFC 6570 level 1 with at least one variable; every variable is a public
-  attribute of the resource and an argument of the action; the action is a generic action
-  returning a string or a binary; `list` (or the primary read) is a read action; and the `row_*`
-  options name public attributes.
+  The URI template is RFC 6570 level 1 with at least one variable and a literal between every two
+  variables; every variable is a public attribute of the resource and an argument of the action;
+  the action is a generic action returning a string or a binary; `list` (or the primary read) is
+  a read action whose pagination has a `default_limit`, the size of the one page
+  `resources/list` reads; and the `row_*` options name public attributes.
   """
   use Spark.Dsl.Verifier
 
@@ -89,15 +90,32 @@ defmodule AshAi.Verifiers.VerifyMcpResourceTemplates do
 
   defp list_problem(resource, nil) do
     case Ash.Resource.Info.primary_action(resource, :read) do
-      nil -> "has no list action and #{inspect(resource)} has no primary read action"
-      _read -> nil
+      nil ->
+        "has no list action and #{inspect(resource)} has no primary read action"
+
+      read ->
+        unless bounded?(read) do
+          "lists through the primary read #{inspect(read.name)}, whose pagination has no default_limit: " <>
+            "resources/list would list every row; declare list: a read action with one"
+        end
     end
   end
 
   defp list_problem(resource, list) do
     case Ash.Resource.Info.action(resource, list) do
-      %{type: :read} -> nil
-      _ -> "list #{inspect(list)} is not a read action of #{inspect(resource)}"
+      %{type: :read} = read ->
+        unless bounded?(read) do
+          "list #{inspect(list)} has no pagination default_limit: resources/list would list every row"
+        end
+
+      _ ->
+        "list #{inspect(list)} is not a read action of #{inspect(resource)}"
     end
   end
+
+  # The listing reads one page of the list action's `default_limit` rows.
+  defp bounded?(%{pagination: %{default_limit: limit}}) when is_integer(limit) and limit > 0,
+    do: true
+
+  defp bounded?(_read), do: false
 end

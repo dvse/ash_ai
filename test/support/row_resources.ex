@@ -4,7 +4,9 @@
 
 # Test support for BLENDED-022 (see BLENDED.md): documents owned by a caller, served as one MCP
 # resource per row. The content actions read the row WITHOUT authorization, so only the
-# server's own read of the row as the caller keeps another caller's documents unreadable.
+# server's own read of the row as the caller keeps another caller's documents unreadable. Every
+# list action pages (`default_limit`), as the verifier requires; `required?: false` keeps the
+# tests' own reads unpaged.
 
 defmodule AshAi.Test.RowResources.Doc do
   @moduledoc false
@@ -31,7 +33,7 @@ defmodule AshAi.Test.RowResources.Doc do
       authorize_if expr(owner == ^actor(:name))
     end
 
-    policy action(:everything) do
+    policy action([:everything, :first_two]) do
       authorize_if always()
     end
 
@@ -45,12 +47,30 @@ defmodule AshAi.Test.RowResources.Doc do
   end
 
   actions do
-    defaults [:read, :destroy, create: [:id, :title, :summary, :owner, :body, :secret]]
+    defaults [:destroy, create: [:id, :title, :summary, :owner, :body, :secret]]
 
-    read :everything
+    read :read do
+      primary? true
+      pagination offset?: true, default_limit: 50, required?: false
+    end
+
+    read :everything do
+      pagination offset?: true, default_limit: 50, required?: false
+    end
 
     read :titled do
       filter expr(not is_nil(title))
+      pagination offset?: true, default_limit: 50, required?: false
+    end
+
+    read :first_two do
+      pagination offset?: true, default_limit: 2, required?: false
+    end
+
+    read :unbounded
+
+    read :no_default do
+      pagination offset?: true, required?: false
     end
 
     action :markdown, :string do
@@ -105,13 +125,35 @@ defmodule AshAi.Test.RowResources.NoPrimary do
   end
 
   actions do
-    read :all
+    read :all do
+      pagination offset?: true, default_limit: 50, required?: false
+    end
+
     create :create, accept: [:id]
     destroy :destroy
 
     action :show, :string do
       argument :id, :integer, allow_nil?: false
       run fn input, _context -> {:ok, "number #{input.arguments.id}"} end
+    end
+  end
+end
+
+defmodule AshAi.Test.RowResources.Loose do
+  @moduledoc false
+  # A primary read without pagination: a template over it must declare a bounded `list`.
+  use Ash.Resource, domain: AshAi.Test.RowResources, data_layer: Ash.DataLayer.Ets
+
+  attributes do
+    attribute :id, :integer, primary_key?: true, allow_nil?: false, public?: true
+  end
+
+  actions do
+    defaults [:read]
+
+    action :show, :string do
+      argument :id, :integer, allow_nil?: false
+      run fn input, _context -> {:ok, "loose #{input.arguments.id}"} end
     end
   end
 end
@@ -123,6 +165,7 @@ defmodule AshAi.Test.RowResources do
   resources do
     resource AshAi.Test.RowResources.Doc
     resource AshAi.Test.RowResources.NoPrimary
+    resource AshAi.Test.RowResources.Loose
   end
 
   mcp_resources do
@@ -172,6 +215,15 @@ defmodule AshAi.Test.RowResources do
       :markdown,
       title: "Every document",
       list: :everything
+    )
+
+    mcp_resource_template(
+      :first_two,
+      "docs://first/{id}",
+      AshAi.Test.RowResources.Doc,
+      :markdown,
+      title: "First two documents",
+      list: :first_two
     )
 
     mcp_resource_template(:number, "numbers://{id}", AshAi.Test.RowResources.NoPrimary, :show,

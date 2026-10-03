@@ -49,6 +49,18 @@ defmodule AshAi.Blended.RowResourcesTest do
                ~s(mcp_resource_template :x uri template "d://{id}/{id}" repeats a variable)
     end
 
+    test "a template with no literal between two variables is refused" do
+      assert refusal(
+               ~s(mcp_resource_template :x, "docs://{owner}{id}", Doc, :by_owner, title: "X")
+             ) ==
+               ~s(mcp_resource_template :x uri template "docs://{owner}{id}" has {owner}{id}: no literal separates the two variables)
+
+      assert McpResourceTemplate.variables("a://{x}{y}/{z}") ==
+               {:error, "has {x}{y}: no literal separates the two variables"}
+
+      assert McpResourceTemplate.variables("a://{x}-{y}") == {:ok, ["x", "y"]}
+    end
+
     test "a variable that is not a public attribute, or not an argument of the action, is refused" do
       assert refusal(
                ~s(mcp_resource_template :x, "docs://{id}/{secret}", Doc, :markdown, title: "X")
@@ -101,6 +113,26 @@ defmodule AshAi.Blended.RowResourcesTest do
                "mcp_resource_template :x variable {style} is not a public attribute of AshAi.Test.RowResources.Doc"
     end
 
+    test "a list action without a pagination default_limit is refused: the listing is bounded" do
+      assert refusal(
+               ~s(mcp_resource_template :x, "docs://{id}", Doc, :markdown, title: "X", list: :unbounded)
+             ) ==
+               "mcp_resource_template :x list :unbounded has no pagination default_limit: resources/list would list every row"
+
+      assert refusal(
+               ~s(mcp_resource_template :x, "docs://{id}", Doc, :markdown, title: "X", list: :no_default)
+             ) ==
+               "mcp_resource_template :x list :no_default has no pagination default_limit: resources/list would list every row"
+
+      assert refusal(~s(mcp_resource_template :x, "l://{id}", Loose, :show, title: "X")) ==
+               "mcp_resource_template :x lists through the primary read :read, whose pagination has no default_limit: " <>
+                 "resources/list would list every row; declare list: a read action with one"
+
+      assert refusal(
+               ~s(mcp_resource_template :x, "docs://{id}", Doc, :markdown, title: "X", list: :first_two)
+             ) == :ok
+    end
+
     test "a resource without a primary read needs a list action" do
       assert refusal(~s(mcp_resource_template :x, "n://{id}", NoPrimary, :show, title: "X")) ==
                "mcp_resource_template :x has no list action and AshAi.Test.RowResources.NoPrimary has no primary read action"
@@ -120,7 +152,7 @@ defmodule AshAi.Blended.RowResourcesTest do
     end
 
     test "templates are introspectable apart from the other resources" do
-      assert [:doc, :owned, :bytes, :broken, :everyone, :number] ==
+      assert [:doc, :owned, :bytes, :broken, :everyone, :first_two, :number] ==
                AshAi.Test.RowResources
                |> AshAi.Info.mcp_resource_templates()
                |> Enum.map(& &1.name)
@@ -146,6 +178,28 @@ defmodule AshAi.Blended.RowResourcesTest do
       assert McpResourceTemplate.match("docs://docs/{id}", "xdocs://docs/a") == :error
       assert McpResourceTemplate.match("docs://docs/{id}", "docs://docs/%zz") == :error
       assert McpResourceTemplate.match("d.cs://{id}", "dxcs://a") == :error
+      assert McpResourceTemplate.match("docs://docs/{id}", "docs://docs/a1\n") == :error
+    end
+
+    test "a variable a literal could end at several places takes the longest span" do
+      assert McpResourceTemplate.match("x://{a}.{b}", "x://p.q.r") ==
+               {:ok, %{"a" => "p.q", "b" => "r"}}
+
+      assert McpResourceTemplate.match("x://{a}-{b}-{c}", "x://a-b-c-d-e") ==
+               {:ok, %{"a" => "a-b-c", "b" => "d", "c" => "e"}}
+    end
+
+    test "matching a long URI takes time linear in its length" do
+      dotted = String.duplicate("a.", 4000)
+
+      {micros, result} =
+        :timer.tc(fn -> McpResourceTemplate.match("x://{a}.{b}.{c}", "x://" <> dotted <> "!") end)
+
+      assert result == :error
+      assert micros < 1_000_000
+
+      assert {:ok, %{"b" => "a", "c" => "a"}} =
+               McpResourceTemplate.match("x://{a}.{b}.{c}", "x://" <> dotted <> "a")
     end
   end
 
@@ -182,6 +236,13 @@ defmodule AshAi.Blended.RowResourcesTest do
                  "mimeType" => "text/markdown"
                },
                %{
+                 "uriTemplate" => "docs://first/{id}",
+                 "name" => "first_two",
+                 "title" => "First two documents",
+                 "description" => "A document as Markdown.",
+                 "mimeType" => "text/plain"
+               },
+               %{
                  "uriTemplate" => "docs://owners/{owner}/docs/{id}",
                  "name" => "owned",
                  "title" => "Owned document",
@@ -201,6 +262,11 @@ defmodule AshAi.Blended.RowResourcesTest do
                )
 
       assert Enum.map(templates, & &1["name"]) == ["broken", "owned"]
+    end
+
+    test "every server answers, with no templates an empty list" do
+      assert rpc("resources/templates/list", nil, @alice, mcp_resources: [])["result"] ==
+               %{"resourceTemplates" => []}
     end
 
     test "a server with only templates has the resources capability, without listChanged" do
@@ -253,6 +319,13 @@ defmodule AshAi.Blended.RowResourcesTest do
 
       assert Enum.map(list(@bob, [:everyone]), & &1["uri"]) ==
                ["docs://all/a%20b%2Fc", "docs://all/a1", "docs://all/b1"]
+    end
+
+    test "the listing reads one page of the list action's default_limit rows" do
+      assert Enum.map(list(@bob, [:first_two]), & &1["uri"]) ==
+               ["docs://first/a%20b%2Fc", "docs://first/a1"]
+
+      assert {:ok, %{"text" => "# \n\nB\n\n(read by bob)"}} = read("docs://first/b1", @bob)
     end
 
     test "rows are listed beside the other resources, in URI order" do
@@ -364,11 +437,12 @@ defmodule AshAi.Blended.RowResourcesTest do
       module,
       Code.string_to_quoted!("""
       use Ash.Domain, extensions: [AshAi], validate_config_inclusion?: false
-      alias AshAi.Test.RowResources.{Doc, NoPrimary}
+      alias AshAi.Test.RowResources.{Doc, Loose, NoPrimary}
 
       resources do
         resource Doc
         resource NoPrimary
+        resource Loose
       end
 
       mcp_resources do
