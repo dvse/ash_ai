@@ -109,6 +109,50 @@ defmodule AshAi.Tool.Execution do
     end
   end
 
+  @doc """
+  The errors of building the tool's action input from a call's arguments without running it
+  (BLENDED-023): the changeset, query or action input `run/4` would run, built with the call's
+  actor, tenant and context. An update or destroy is built over an unloaded record of the
+  resource, as no record is read. Returns `{:ok, errors}`, or `:error` when the call does not
+  reach the build (`input` is not an object, an unknown input) or the build raises.
+  """
+  def input_errors(
+        %AshAi.Tool{
+          domain: domain,
+          resource: resource,
+          action: action,
+          arguments: tool_arguments
+        },
+        client_arguments,
+        context
+      ) do
+    arguments = client_arguments || %{}
+    client_input = arguments["input"] || %{}
+
+    with :ok <- validate_input_shape(client_input),
+         :ok <- validate_inputs!(resource, client_input, action, tool_arguments) do
+      opts = build_opts(domain, context)
+      input = Map.take(client_input, valid_action_inputs(resource, action))
+
+      built =
+        case action.type do
+          :create -> Ash.Changeset.for_create(resource, action.name, input, opts)
+          :update -> Ash.Changeset.for_update(struct(resource), action.name, input, opts)
+          :destroy -> Ash.Changeset.for_destroy(struct(resource), action.name, input, opts)
+          :read -> Ash.Query.for_read(resource, action.name, input, opts)
+          :action -> Ash.ActionInput.for_action(resource, action.name, input, opts)
+        end
+
+      {:ok, built.errors}
+    else
+      _other -> :error
+    end
+  rescue
+    _error -> :error
+  catch
+    {:tool_error, _message} -> :error
+  end
+
   # BLENDED-013: from ash_hyperlang lib/ash_hyperlang/eval_actions/policy_breakdown.ex:13
   # (`enrich/3`) and lib/ash_hyperlang/guest_error.ex:61 (`policy_denial/3`). With
   # `policy_breakdown?: true` a policy denial logs the full Ash policy report host-side and

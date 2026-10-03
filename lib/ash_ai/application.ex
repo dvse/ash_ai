@@ -9,7 +9,8 @@ defmodule AshAi.Application do
   @impl true
   def start(_type, _args) do
     Supervisor.start_link(
-      [],
+      # BLENDED-023: the elicitation state of initialize-based MCP connections.
+      AshAi.Mcp.Elicitations.child_specs(),
       strategy: :one_for_one,
       name: AshAi.Supervisor
     )

@@ -113,6 +113,13 @@ defmodule AshAi.Dsl do
       default: [],
       doc:
         "Public action arguments of type `:map` or `{:array, :map}` that take files in the OpenAI Apps SDK shape `{download_url, file_id, mime_type, file_name}`. Each leaves the `input` envelope and becomes a top-level property with that exact schema (or an array of it), the tool's `_meta[\"openai/fileParams\"]` names them, and a call's values are checked for that shape and put back into the action input."
+    ],
+    # BLENDED-023: MCP form elicitation of missing input
+    elicit_missing?: [
+      type: :boolean,
+      default: false,
+      doc:
+        "Ask the user for missing input. An MCP `tools/call` builds the action's input first, without running it; when every error is a missing or invalid value of an input the tool's schema declares, the call is answered with a form elicitation request for exactly those inputs (an `input_required` result in MCP 2026-07-28, a server-to-client `elicitation/create` request on initialize-based connections that can stream), and the client calls again with the answers. The action then runs once, as any call does. Only when the client declares form elicitation (or the `openai/elicitation` extension's `form`); otherwise the call runs as it would without the option."
     ]
   ]
 

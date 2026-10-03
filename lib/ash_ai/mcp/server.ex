@@ -30,6 +30,7 @@ defmodule AshAi.Mcp.Server do
   """
 
   alias AshAi.Tool
+  alias AshAi.Tool.Elicitation
 
   require Logger
 
@@ -52,6 +53,9 @@ defmodule AshAi.Mcp.Server do
   @meta_subscription_id "io.modelcontextprotocol/subscriptionId"
   @ui_extension "io.modelcontextprotocol/ui"
   @ui_mime_type "text/html;profile=mcp-app"
+  # BLENDED-023: how long a streaming `tools/call` waits for its client's answer.
+  @elicitation_timeout_ms 300_000
+  @elicitation_request_prefix "ash_ai/elicitation/"
 
   @doc """
   The protocol versions this server supports, newest first.
@@ -88,8 +92,31 @@ defmodule AshAi.Mcp.Server do
 
   # sobelow_skip ["XSS.SendResp"]
   defp handle_initialize_based_post(conn, body, session_id, opts) do
-    case process_request(body, session_id, opts) do
+    # BLENDED-023: a client's answer to a server request a streaming call waits on.
+    if elicitation_answer?(body) and
+         AshAi.Mcp.Elicitations.deliver(session_id, body) == :ok do
+      Plug.Conn.send_resp(conn, 202, "")
+    else
+      handle_initialize_based_message(conn, body, session_id, opts)
+    end
+  end
+
+  # sobelow_skip ["XSS.SendResp"]
+  defp handle_initialize_based_message(conn, body, session_id, opts) do
+    case process_request(body, session_id, legacy_elicitation_opts(conn, body, session_id, opts)) do
+      # BLENDED-023: missing input is asked of the client over this call's stream.
+      {:input_required, {id, params, request}, session_id} ->
+        stream_elicitation(conn, id, params, request, session_id, opts)
+
       {:initialize_response, response, new_session_id} ->
+        # BLENDED-023: a client that can be asked for input over a stream is remembered.
+        if streaming?(conn) do
+          AshAi.Mcp.Elicitations.put_session(
+            new_session_id,
+            body |> initialize_capabilities() |> Elicitation.dialect()
+          )
+        end
+
         # Return the initialize response with a session ID header
         conn
         |> Plug.Conn.put_resp_header("content-type", "application/json")
@@ -118,6 +145,109 @@ defmodule AshAi.Mcp.Server do
   # Plug.Parsers wraps JSON array bodies (2025-03-26 batch requests) in a "_json" key
   defp unwrap_json_params(%{"_json" => list}) when is_list(list), do: list
   defp unwrap_json_params(body), do: body
+
+  # BLENDED-023: an initialize-based client is asked for missing input with a server-to-client
+  # request on the `tools/call` response's SSE stream, and answers it with a separate POST. That
+  # needs a connection the server can stream to (any but the in-memory conn of
+  # `AshAi.McpActions`, whose response is returned whole when the action ends), a session whose
+  # client declared form elicitation at `initialize`, and a single (not batched) request.
+  defp streaming?(%Plug.Conn{adapter: {AshAi.McpActions.Conn, _payload}}), do: false
+  defp streaming?(%Plug.Conn{}), do: true
+
+  defp legacy_elicitation_opts(conn, %{"method" => "tools/call"}, session_id, opts) do
+    with true <- streaming?(conn),
+         dialect when not is_nil(dialect) <-
+           AshAi.Mcp.Elicitations.session_dialect(session_id) do
+      Keyword.put(opts, :elicitation, %{dialect: dialect, responses: nil})
+    else
+      _ -> opts
+    end
+  end
+
+  defp legacy_elicitation_opts(_conn, _body, _session_id, opts), do: opts
+
+  defp initialize_capabilities(%{"method" => "initialize", "params" => %{} = params}),
+    do: params["capabilities"]
+
+  defp initialize_capabilities(_body), do: nil
+
+  defp elicitation_answer?(%{"id" => @elicitation_request_prefix <> _} = body),
+    do:
+      not Map.has_key?(body, "method") and
+        (Map.has_key?(body, "result") or Map.has_key?(body, "error"))
+
+  defp elicitation_answer?(_body), do: false
+
+  # BLENDED-023: the call's response becomes an SSE stream: each form request is sent as a
+  # JSON-RPC request, its answer (delivered by the client's POST) is the next round's
+  # `inputResponses`, and the call's result closes the stream. An unanswered request is a
+  # cancel; an error answer runs the call as it would without the option.
+  defp stream_elicitation(conn, id, params, request, session_id, opts) do
+    conn =
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+      |> Plug.Conn.put_resp_header("cache-control", "no-cache")
+      |> Plug.Conn.put_resp_header("x-accel-buffering", "no")
+      |> Plug.Conn.send_chunked(200)
+
+    {conn, response} = elicitation_round(conn, id, params, request, session_id, opts)
+    send_sse_event(conn, "message", response)
+  end
+
+  defp elicitation_round(conn, id, params, request, session_id, opts) do
+    request_id = @elicitation_request_prefix <> Ash.UUIDv7.generate()
+    :ok = AshAi.Mcp.Elicitations.await(session_id, request_id)
+
+    conn =
+      send_sse_event(
+        conn,
+        "message",
+        Jason.encode!(Map.merge(%{"jsonrpc" => "2.0", "id" => request_id}, request))
+      )
+
+    answer =
+      receive do
+        {AshAi.Mcp.Elicitations, ^request_id, answer} -> answer
+      after
+        Keyword.get(opts, :elicitation_timeout_ms, @elicitation_timeout_ms) -> :timeout
+      end
+
+    AshAi.Mcp.Elicitations.done(session_id, request_id)
+
+    opts =
+      case answer do
+        %{"result" => result} ->
+          Keyword.put(opts, :elicitation, %{
+            dialect: AshAi.Mcp.Elicitations.session_dialect(session_id),
+            responses: %{Elicitation.input_key() => result}
+          })
+
+        :timeout ->
+          Keyword.put(opts, :elicitation, %{
+            dialect: AshAi.Mcp.Elicitations.session_dialect(session_id),
+            responses: %{Elicitation.input_key() => %{"action" => "cancel"}}
+          })
+
+        _error ->
+          Keyword.delete(opts, :elicitation)
+      end
+
+    case execute_tool_call(params, session_id, opts) do
+      {:input_required, request} ->
+        elicitation_round(conn, id, params, request, session_id, opts)
+
+      {:ok, result} ->
+        {conn, Jason.encode!(%{"jsonrpc" => "2.0", "id" => id, "result" => result})}
+
+      {:error, :tool_not_found} ->
+        {conn,
+         Jason.encode!(%{
+           "jsonrpc" => "2.0",
+           "id" => id,
+           "error" => %{"code" => -32_602, "message" => "Tool not found: #{params["name"]}"}
+         })}
+    end
+  end
 
   # Era selection per the 2026-07-28 versioning spec: `initialize` without
   # per-request `_meta` selects initialize-based semantics; with a `_meta`
@@ -342,9 +472,20 @@ defmodule AshAi.Mcp.Server do
   end
 
   defp dispatch_2026_07_28(conn, "tools/call", id, params, opts) do
+    # BLENDED-023: the request carries its client's capabilities and the answers to an earlier
+    # input request (MRTR).
+    opts =
+      Keyword.put(opts, :elicitation, %{
+        dialect: Elicitation.dialect(client_capabilities_2026_07_28(params)),
+        responses: params["inputResponses"]
+      })
+
     case execute_tool_call(params, nil, opts) do
       {:ok, result} ->
         response_2026_07_28(conn, 200, id, result_2026_07_28(result, opts))
+
+      {:input_required, request} ->
+        response_2026_07_28(conn, 200, id, input_required_2026_07_28(request, opts))
 
       {:error, :tool_not_found} ->
         error_response_2026_07_28(conn, 200, id, -32_602, "Tool not found: #{params["name"]}")
@@ -457,6 +598,21 @@ defmodule AshAi.Mcp.Server do
       %{@meta_server_info => server_info},
       &Map.put(&1, @meta_server_info, server_info)
     )
+  end
+
+  # BLENDED-023: MCP 2026-07-28 `InputRequiredResult`: the input requests, keyed, and no
+  # `requestState` (nothing is kept between the calls).
+  defp input_required_2026_07_28(request, opts) do
+    %{
+      "resultType" => "input_required",
+      "inputRequests" => %{Elicitation.input_key() => request},
+      "_meta" => %{
+        @meta_server_info => %{
+          "name" => get_server_name(opts),
+          "version" => get_server_version(opts)
+        }
+      }
+    }
   end
 
   defp cacheable_result(result, opts, kind) do
@@ -587,6 +743,9 @@ defmodule AshAi.Mcp.Server do
 
       _initialize_based_or_absent ->
         if session_id do
+          # BLENDED-023
+          AshAi.Mcp.Elicitations.delete_session(session_id)
+
           conn
           |> Plug.Conn.send_resp(200, "")
         else
@@ -870,6 +1029,10 @@ defmodule AshAi.Mcp.Server do
 
       %{"method" => "tools/call", "id" => id, "params" => params} ->
         case execute_tool_call(params, session_id, opts) do
+          # BLENDED-023: only with the `:elicitation` option, which the streaming handler sets.
+          {:input_required, request} ->
+            {:input_required, {id, params, request}, session_id}
+
           {:ok, result} ->
             response = %{
               "jsonrpc" => "2.0",
@@ -1165,7 +1328,7 @@ defmodule AshAi.Mcp.Server do
         context = tool_context(opts)
 
         case AshAi.Page.view_of(tool, mcp_ui_resources(opts)) do
-          nil -> execute_found_tool(tool, tool_args, context, opts)
+          nil -> execute_called_tool(tool, tool_args, context, opts)
           view -> execute_page_tool(tool, view, tool_args, context, opts)
         end
 
@@ -1255,12 +1418,52 @@ defmodule AshAi.Mcp.Server do
 
   defp drop_properties(schema, _names), do: schema
 
-  defp execute_found_tool(tool, tool_args, context, opts) do
+  # BLENDED-023: a tool that elicits missing input, called by a client that can be asked: an
+  # answer is merged into the call's arguments (or, declined or cancelled, answers the call), and
+  # the call is decided before it runs.
+  defp execute_called_tool(%Tool{elicit_missing?: true} = tool, tool_args, context, opts) do
+    case opts[:elicitation] do
+      %{dialect: dialect, responses: responses} when not is_nil(dialect) ->
+        case Elicitation.answer(responses) do
+          refusal when refusal in [:decline, :cancel] ->
+            {:ok, tool_error_result(Elicitation.refusal_text(tool, refusal))}
+
+          {:accept, content} ->
+            tool
+            |> execute_found_tool(
+              Elicitation.merge(tool_args, content),
+              context,
+              opts,
+              {dialect, content}
+            )
+
+          nil ->
+            execute_found_tool(tool, tool_args, context, opts, {dialect, %{}})
+        end
+
+      _not_askable ->
+        execute_found_tool(tool, tool_args, context, opts)
+    end
+  end
+
+  defp execute_called_tool(tool, tool_args, context, opts),
+    do: execute_found_tool(tool, tool_args, context, opts)
+
+  defp execute_found_tool(tool, tool_args, context, opts, elicitation \\ nil) do
     with {:ok, transformed_args} <- transform_tool_arguments(tool, tool_args, context, opts),
          # BLENDED-018: file fields go back into the action input.
          {:ok, transformed_args} <-
            AshAi.Tool.OpenAi.reconstruct_arguments(tool, transformed_args) do
-      execute_resolved_tool(tool, transformed_args, context, opts)
+      case elicitation do
+        {dialect, answered} ->
+          case Elicitation.decide(tool, transformed_args, context, dialect, answered) do
+            {:input_required, request} -> {:input_required, request}
+            :run -> execute_resolved_tool(tool, transformed_args, context, opts)
+          end
+
+        nil ->
+          execute_resolved_tool(tool, transformed_args, context, opts)
+      end
     else
       {:error, error_text} ->
         {:ok, tool_error_result(error_text)}

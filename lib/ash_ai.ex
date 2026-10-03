@@ -54,6 +54,8 @@ defmodule AshAi do
       # BLENDED-016/018 (see BLENDED.md)
       :security_schemes,
       file_params: [],
+      # BLENDED-023 (see BLENDED.md)
+      elicit_missing?: false,
       refine?: true,
       continuation_target?: false,
       annotations: [],
@@ -410,6 +412,7 @@ defmodule AshAi do
         :__identifier__,
         :security_schemes,
         file_params: [],
+        elicit_missing?: false,
         refine?: true,
         continuation_target?: false,
         annotations: [],
