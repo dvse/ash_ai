@@ -1372,7 +1372,7 @@ defmodule AshAi.Mcp.Server do
   defp execute_page_tool(tool, view, tool_args, context, opts) do
     case AshAi.Page.prepare(tool, tool_args, context, view) do
       :anonymous ->
-        execute_found_tool(tool, tool_args, context, opts)
+        execute_called_tool(tool, tool_args, context, opts)
 
       {:ok, call} ->
         if AshAi.Page.close_tool?(tool, view) do
@@ -1387,20 +1387,47 @@ defmodule AshAi.Mcp.Server do
     end
   end
 
+  # BLENDED-023 on a page view (BLENDED-025 review): the author's tool of a view (any tool the
+  # view did not generate) is decided as any called tool is, before the page mounts or the action
+  # runs: missing input is asked (`input_required`, or the legacy stream), a declined or cancelled
+  # answer is the call's error, and in both cases nothing is rendered, as the action did not run.
+  # The answered input is merged into the call's arguments before the action runs.
   defp execute_prepared_page_tool(tool, view, tool_args, call, opts) do
+    decision =
+      if open_tool?(tool, view) or AshAi.Page.generated?(tool, view),
+        do: :generated,
+        else: decide_called_tool(tool, call.arguments, call.context, opts)
+
+    case decision do
+      {:input_required, request} -> {:input_required, request}
+      {:refused, result} -> {:ok, result}
+      decision -> render_page_tool(tool, view, tool_args, call, opts, decision)
+    end
+  end
+
+  defp render_page_tool(tool, view, tool_args, call, opts, decision) do
     {:ok, result} =
       cond do
         open_tool?(tool, view) ->
           {:ok, %{"isError" => false, "content" => [%{"type" => "text", "text" => "Opened."}]}}
+
+        match?({:ok, _error_result}, decision) ->
+          decision
 
         (mounted = AshAi.Page.ensure_mounted(tool, call, view, tool_args)) != :ok ->
           {:error, text} = mounted
           {:ok, tool_error_result(text)}
 
         true ->
-          case AshAi.Page.run(tool, call, view, tool_args) do
-            {:ok, result} -> {:ok, result}
-            :default -> execute_found_tool(tool, call.arguments, call.context, opts)
+          case {AshAi.Page.run(tool, call, view, tool_args), decision} do
+            {{:ok, result}, _decision} ->
+              {:ok, result}
+
+            {:default, {:run, arguments}} ->
+              execute_resolved_tool(tool, arguments, call.context, opts)
+
+            {:default, :generated} ->
+              execute_found_tool(tool, call.arguments, call.context, opts)
           end
       end
 
@@ -1477,16 +1504,27 @@ defmodule AshAi.Mcp.Server do
   # BLENDED-023: a tool that elicits missing input, called by a client that can be asked: an
   # answer is merged into the call's arguments (or, declined or cancelled, answers the call), and
   # the call is decided before it runs.
-  defp execute_called_tool(%Tool{elicit_missing?: true} = tool, tool_args, context, opts) do
+  defp execute_called_tool(tool, tool_args, context, opts) do
+    case decide_called_tool(tool, tool_args, context, opts) do
+      {:run, arguments} -> execute_resolved_tool(tool, arguments, context, opts)
+      {:refused, result} -> {:ok, result}
+      other -> other
+    end
+  end
+
+  # The decision on a called tool before anything runs: `{:run, arguments}` (transformed, with an
+  # accepted answer merged), `{:input_required, request}`, `{:refused, result}` (a declined or
+  # cancelled answer) or `{:ok, error_result}` (the arguments could not be transformed).
+  defp decide_called_tool(%Tool{elicit_missing?: true} = tool, tool_args, context, opts) do
     case opts[:elicitation] do
       %{dialect: dialect, responses: responses} when not is_nil(dialect) ->
         case Elicitation.answer(responses) do
           refusal when refusal in [:decline, :cancel] ->
-            {:ok, tool_error_result(Elicitation.refusal_text(tool, refusal))}
+            {:refused, tool_error_result(Elicitation.refusal_text(tool, refusal))}
 
           {:accept, content} ->
-            tool
-            |> execute_found_tool(
+            decide_found_tool(
+              tool,
               Elicitation.merge(tool_args, content),
               context,
               opts,
@@ -1494,18 +1532,18 @@ defmodule AshAi.Mcp.Server do
             )
 
           nil ->
-            execute_found_tool(tool, tool_args, context, opts, {dialect, %{}})
+            decide_found_tool(tool, tool_args, context, opts, {dialect, %{}})
         end
 
       _not_askable ->
-        execute_found_tool(tool, tool_args, context, opts)
+        decide_found_tool(tool, tool_args, context, opts, nil)
     end
   end
 
-  defp execute_called_tool(tool, tool_args, context, opts),
-    do: execute_found_tool(tool, tool_args, context, opts)
+  defp decide_called_tool(tool, tool_args, context, opts),
+    do: decide_found_tool(tool, tool_args, context, opts, nil)
 
-  defp execute_found_tool(tool, tool_args, context, opts, elicitation \\ nil) do
+  defp decide_found_tool(tool, tool_args, context, opts, elicitation) do
     with {:ok, transformed_args} <- transform_tool_arguments(tool, tool_args, context, opts),
          # BLENDED-018: file fields go back into the action input.
          {:ok, transformed_args} <-
@@ -1514,15 +1552,22 @@ defmodule AshAi.Mcp.Server do
         {dialect, answered} ->
           case Elicitation.decide(tool, transformed_args, context, dialect, answered) do
             {:input_required, request} -> {:input_required, request}
-            :run -> execute_resolved_tool(tool, transformed_args, context, opts)
+            :run -> {:run, transformed_args}
           end
 
         nil ->
-          execute_resolved_tool(tool, transformed_args, context, opts)
+          {:run, transformed_args}
       end
     else
       {:error, error_text} ->
         {:ok, tool_error_result(error_text)}
+    end
+  end
+
+  defp execute_found_tool(tool, tool_args, context, opts) do
+    case decide_found_tool(tool, tool_args, context, opts, nil) do
+      {:run, arguments} -> execute_resolved_tool(tool, arguments, context, opts)
+      other -> other
     end
   end
 

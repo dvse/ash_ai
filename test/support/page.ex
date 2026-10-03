@@ -30,6 +30,16 @@ defmodule AshAi.Test.Page.Item do
   actions do
     defaults [:read, :destroy, create: [:id, :label]]
 
+    # BLENDED-023 on a view: the author's tool `pick_item` asks for its item.
+    action :pick, :string do
+      argument :item, :string, allow_nil?: false
+
+      run fn input, _context ->
+        send(self(), {:picked, input.arguments.item})
+        {:ok, "picked #{input.arguments.item}"}
+      end
+    end
+
     update :toggle do
       require_atomic? false
 
@@ -288,6 +298,11 @@ defmodule AshAi.Test.Page do
     tool :show_counter, Item, :read, ui: :counter
     tool :list_items, Item, :read
     tool :show_guarded, Item, :read, ui: :guarded
+
+    tool :pick_item, Item, :pick,
+      ui: :counter,
+      elicit_missing?: true,
+      argument_choices: [item: [action: :read, value: :id, title: :label]]
   end
 
   mcp_resources do

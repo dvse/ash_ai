@@ -202,7 +202,7 @@ Details the table above leaves open, resolved while implementing this branch.
   the action validates the answer anyway. `pattern` is sent only in the OpenAI dialect, the only
   one whose string schema defines it. The key of the request is `missing_input`. The streaming
   path is chosen per call: an initialize-based call whose tool needs nothing is answered with
-  upstream's JSON. A page-view tool (BLENDED-020) is never elicited.
+  upstream's JSON. A view's generated tools (BLENDED-020/025: open, close, page actions) are never elicited; the author's tool of a view (`ui:`) with `elicit_missing?` is decided exactly as any called tool, before the page mounts or its action runs (`execute_prepared_page_tool`: `input_required` on 2026-07-28, the legacy stream where the connection streams, the call's error otherwise), the answer merged into the call's arguments first; when the call is asked again or the answer is declined or cancelled, nothing runs and no page is rendered (an anonymous caller's call, which has no page, is decided the same way).
 
 - **BLENDED-024** — `AshAi.Tool.Elicitation.argument_choices/1` checks and resolves the option.
   The options are listed each time a form is built, so they are the rows the caller may read at

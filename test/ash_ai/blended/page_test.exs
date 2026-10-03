@@ -14,6 +14,8 @@ defmodule AshAi.Blended.PageTest do
 
   @alice %{id: "alice", name: "Alice"}
   @bob %{id: "bob", name: "Bob"}
+  @standard %{"elicitation" => %{}}
+  @elicit_tools [:show_counter, :list_items, :show_guarded, :pick_item]
 
   setup do
     for resource <- [CounterPage, Item, GuardedPage],
@@ -461,6 +463,84 @@ defmodule AshAi.Blended.PageTest do
                    fn -> AshAi.Page.ensure_unique_names!(tools) end
     end
 
+    test "a view's tool that elicits missing input asks before the page mounts or renders" do
+      item = Ash.create!(Item, %{label: "one"})
+
+      asked = elicited_call(%{}, @standard)
+      assert asked["resultType"] == "input_required"
+      params = asked["inputRequests"]["missing_input"]["params"]
+      assert params["message"] == "pick_item needs more input.\nitem: is required"
+
+      assert params["requestedSchema"]["properties"]["item"]["oneOf"] == [
+               %{"const" => item.id, "title" => "one"}
+             ]
+
+      refute asked["_meta"]["ash_ai/page"]
+      refute_received {:page_render, _}
+      refute_received {:picked, _}
+
+      answered =
+        elicited_call(%{}, @standard, %{"inputResponses" => accept(%{"item" => item.id})})
+
+      refute answered["isError"]
+      assert answered["content"] == [%{"type" => "text", "text" => ~s("picked #{item.id}")}]
+      assert answered["_meta"]["ash_ai/page"]["html"] =~ "count=0"
+      assert_received {:picked, picked}
+      assert picked == item.id
+      assert_received {:page_render, nil}
+      refute_received {:picked, _}
+    end
+
+    test "a view's eliciting tool re-asks an invalid answer and runs nothing on a refusal" do
+      Ash.create!(Item, %{label: "one"})
+
+      outside = elicited_call(%{}, @standard, %{"inputResponses" => accept(%{"item" => "nope"})})
+      assert outside["resultType"] == "input_required"
+
+      assert outside["inputRequests"]["missing_input"]["params"]["message"] ==
+               "pick_item needs more input.\nitem: is not one of the choices offered"
+
+      declined =
+        elicited_call(%{}, @standard, %{
+          "inputResponses" => %{"missing_input" => %{"action" => "decline"}}
+        })
+
+      assert declined["isError"]
+
+      assert declined["content"] == [
+               %{"type" => "text", "text" => "input declined: tool pick_item did not run"}
+             ]
+
+      refute declined["_meta"]["ash_ai/page"]
+      refute_received {:page_render, _}
+      refute_received {:picked, _}
+
+      # A client that cannot be asked gets the call's error, with the page, as before.
+      plain = elicited_call(%{}, %{})
+      assert plain["isError"]
+      assert [%{"text" => "item: is required"}] = plain["content"]
+      assert plain["_meta"]["ash_ai/page"]["errors"] == ["item: is required"]
+    end
+
+    test "a view's eliciting tool asks over the legacy stream, then runs once and renders" do
+      item = Ash.create!(Item, %{label: "one"})
+      session = initialize_session(@standard)
+      task = Task.async(fn -> legacy_pick(session) end)
+      [request_id] = wait_pending(session)
+
+      assert legacy_post(session, %{
+               "jsonrpc" => "2.0",
+               "id" => request_id,
+               "result" => %{"action" => "accept", "content" => %{"item" => item.id}}
+             }).status == 202
+
+      body = Task.await(task)
+      [request, %{"result" => result}] = sse_events(body)
+      assert request["method"] == "elicitation/create"
+      refute result["isError"]
+      assert result["_meta"]["ash_ai/page"]["html"] =~ "count=0"
+    end
+
     test "tools that are not the view's carry no page" do
       result = call("list_items", %{}, @alice)
       refute result["_meta"]["ash_ai/page"]
@@ -472,6 +552,90 @@ defmodule AshAi.Blended.PageTest do
     |> Plug.Conn.put_req_header("accept", "application/json, text/event-stream")
     |> AshAi.Mcp.Router.call(AshAi.Mcp.Router.init(opts))
     |> Map.fetch!(:resp_body)
+  end
+
+  defp accept(content),
+    do: %{"missing_input" => %{"action" => "accept", "content" => content}}
+
+  # A 2026-07-28 call of the view's eliciting tool `pick_item`, as alice.
+  defp elicited_call(arguments, capabilities, params \\ %{}) do
+    meta = %{
+      "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities" => capabilities
+    }
+
+    Plug.Test.conn(:post, "/", %{
+      "jsonrpc" => "2.0",
+      "id" => 1,
+      "method" => "tools/call",
+      "params" =>
+        Map.merge(%{"name" => "pick_item", "arguments" => arguments, "_meta" => meta}, params)
+    })
+    |> Plug.Conn.put_req_header("mcp-protocol-version", "2026-07-28")
+    |> Plug.Conn.put_req_header("mcp-method", "tools/call")
+    |> Plug.Conn.put_req_header("mcp-name", "pick_item")
+    |> then(&%{&1 | req_headers: [{"host", "www.example.com"} | &1.req_headers]})
+    |> Ash.PlugHelpers.set_actor(@alice)
+    |> AshAi.Mcp.Router.call(elicit_router_opts())
+    |> then(&Jason.decode!(&1.resp_body)["result"])
+  end
+
+  defp elicit_router_opts do
+    AshAi.Mcp.Router.init(
+      otp_app: :ash_ai,
+      actions: [{Item, :*}],
+      tools: @elicit_tools,
+      mcp_resources: [:counter, :static, :guarded]
+    )
+  end
+
+  defp legacy_post(session, body) do
+    Plug.Test.conn(:post, "/", body)
+    |> Plug.Conn.put_req_header("accept", "application/json, text/event-stream")
+    |> then(&%{&1 | req_headers: [{"host", "www.example.com"} | &1.req_headers]})
+    |> then(&if(session, do: Plug.Conn.put_req_header(&1, "mcp-session-id", session), else: &1))
+    |> Ash.PlugHelpers.set_actor(@alice)
+    |> AshAi.Mcp.Router.call(elicit_router_opts())
+  end
+
+  defp initialize_session(capabilities) do
+    conn =
+      legacy_post(nil, %{
+        "jsonrpc" => "2.0",
+        "id" => 0,
+        "method" => "initialize",
+        "params" => %{"protocolVersion" => "2025-06-18", "capabilities" => capabilities}
+      })
+
+    [session] = Plug.Conn.get_resp_header(conn, "mcp-session-id")
+    session
+  end
+
+  defp legacy_pick(session) do
+    legacy_post(session, %{
+      "jsonrpc" => "2.0",
+      "id" => 1,
+      "method" => "tools/call",
+      "params" => %{"name" => "pick_item", "arguments" => %{}}
+    }).resp_body
+  end
+
+  defp wait_pending(session, attempts \\ 200) do
+    case AshAi.Mcp.Elicitations.pending(session) do
+      [] when attempts > 0 ->
+        Process.sleep(10)
+        wait_pending(session, attempts - 1)
+
+      ids ->
+        ids
+    end
+  end
+
+  defp sse_events(body) do
+    body
+    |> String.split("\n")
+    |> Enum.filter(&String.starts_with?(&1, "data: "))
+    |> Enum.map(&(&1 |> String.trim_leading("data: ") |> Jason.decode!()))
   end
 
   defp tools(actor, opts \\ []) do
