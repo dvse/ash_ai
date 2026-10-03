@@ -152,8 +152,8 @@ Details the table above leaves open, resolved while implementing this branch.
 
 - **BLENDED-025** — `AshAi.Page` holds the rules (`presentation_schema/1`, `put_presentation/2`,
   `close_input_schema/1`, `close_tool_name/1`, `close_tool?/2`, `close/2`). The handle is opaque to
-  ash_ai: it is validated only as a string of at most 128 characters (`String.length/1`,
-  characters, not bytes) and handed to the framework; what it names, and whether a stale or
+  ash_ai: it is validated only as a string of at most 128 characters, counted as JSON Schema
+  counts `maxLength` (Unicode code points, not graphemes or bytes), and handed to the framework; what it names, and whether a stale or
   unknown one is honoured, is the framework's affair. The close tool is the open tool's struct
   renamed (resource the page, action its `:mount`), so it passes the same `can?` pre-check, but it
   runs no action and renders nothing.

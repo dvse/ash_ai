@@ -340,8 +340,11 @@ defmodule AshAi.Page do
     end
   end
 
+  # Characters as JSON Schema's `maxLength` counts them: code points, not graphemes or bytes.
   defp valid_presentation(value) do
-    if String.length(value) <= @presentation_max_length, do: {:ok, value}, else: :error
+    if String.valid?(value) and length(String.to_charlist(value)) <= @presentation_max_length,
+      do: {:ok, value},
+      else: :error
   end
 
   defp prepare(tool, arguments, context, view, presentation) do

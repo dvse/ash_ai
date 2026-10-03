@@ -378,6 +378,16 @@ defmodule AshAi.Blended.PageTest do
       refute call("counter_page", %{"presentation" => String.duplicate("é", 128)}, @alice)[
                "isError"
              ]
+
+      # Code points, as JSON Schema counts maxLength: 65 "e" + combining acute are 65 graphemes
+      # but 130 characters; 128 astral characters are 128.
+      assert call("counter_page", %{"presentation" => String.duplicate("e\u0301", 65)}, @alice)[
+               "isError"
+             ]
+
+      refute call("counter_page", %{"presentation" => String.duplicate("😀", 128)}, @alice)[
+               "isError"
+             ]
     end
 
     test "the close tool closes the caller's presentation through the framework" do
