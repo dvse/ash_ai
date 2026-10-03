@@ -19,7 +19,11 @@ defmodule AshAi do
       AshAi.Transformers.ResourceTools,
       AshAi.Transformers.McpApps
     ],
-    verifiers: [AshAi.Verifiers.McpResourceActionsReturnString, AshAi.Verifiers.VerifyExposures]
+    verifiers: [
+      AshAi.Verifiers.McpResourceActionsReturnString,
+      AshAi.Verifiers.VerifyExposures,
+      AshAi.Verifiers.VerifyMcpResourceTemplates
+    ]
 
   defmodule Tool do
     @moduledoc "An action exposed to LLM agents"
@@ -724,6 +728,40 @@ defmodule AshAi do
           | domain: domain,
             action: action,
             description: mcp_resource.description || action.description
+        }
+      end)
+    end)
+  end
+
+  # BLENDED-022: row-backed MCP resources, filtered as `mcp_resource` entries are.
+  @doc false
+  def exposed_mcp_resource_templates(opts) when is_list(opts) do
+    exposed_mcp_resource_templates(Options.validate!(opts))
+  end
+
+  def exposed_mcp_resource_templates(opts) do
+    opts
+    |> resolve_domains()
+    |> Enum.flat_map(fn domain ->
+      domain
+      |> AshAi.Info.mcp_resource_templates()
+      |> Enum.filter(fn template ->
+        valid_mcp_resource(template, opts.mcp_resources, opts.actions, opts.exclude_actions)
+      end)
+      |> Enum.map(fn template ->
+        action = Ash.Resource.Info.action(template.resource, template.action)
+
+        list =
+          if template.list,
+            do: Ash.Resource.Info.action(template.resource, template.list),
+            else: Ash.Resource.Info.primary_action!(template.resource, :read)
+
+        %{
+          template
+          | domain: domain,
+            action: action,
+            list: list,
+            description: template.description || action.description
         }
       end)
     end)

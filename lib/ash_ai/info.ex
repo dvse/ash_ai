@@ -30,6 +30,17 @@ defmodule AshAi.Info do
   end
 
   @doc """
+  Returns only `%AshAi.McpResourceTemplate{}` entities (row-backed, BLENDED-022) from the
+  `:mcp_resources` section.
+  """
+  @spec mcp_resource_templates(module | map) :: [AshAi.McpResourceTemplate.t()]
+  def mcp_resource_templates(dsl_or_extended) do
+    dsl_or_extended
+    |> mcp_resources()
+    |> Enum.filter(&match?(%AshAi.McpResourceTemplate{}, &1))
+  end
+
+  @doc """
   Returns only `%AshAi.Tool{}` entities from the `:tools` section.
 
   Spark's auto-generated `tools/1` returns every entity in the section, including

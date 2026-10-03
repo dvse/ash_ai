@@ -543,11 +543,77 @@ defmodule AshAi.Dsl do
     args: [:name, :uri, :resource, :action]
   }
 
+  # BLENDED-022: row-backed MCP resources, one per row (`AshAi.McpResourceTemplate`).
+  @mcp_resource_template_schema [
+    name: [type: :atom, required: true],
+    uri_template: [
+      type: :string,
+      required: true,
+      doc:
+        "An RFC 6570 level 1 URI template, e.g. `mcp://parts/{id}`. Every `{variable}` is a public attribute of the resource and an argument of the action."
+    ],
+    resource: [type: {:spark, Ash.Resource}, required: true],
+    action: [
+      type: :atom,
+      required: true,
+      doc:
+        "A generic action returning `:string` (text contents) or `:binary` (blob contents). It runs with the URI's values as arguments."
+    ],
+    list: [
+      type: :atom,
+      doc:
+        "The read action whose rows are the resources, for the caller. Defaults to the primary read action. `resources/read` reads the row through it too."
+    ],
+    title: [
+      type: :string,
+      required: true,
+      doc: "A short, human-readable title for the template."
+    ],
+    description: [
+      type: :string,
+      doc: "A description of the template. Defaults to the action's description."
+    ],
+    mime_type: [
+      type: :string,
+      default: "text/plain",
+      doc: "The MIME type of every row's resource."
+    ],
+    row_name: [
+      type: :atom,
+      doc: "A public attribute whose value is each row's resource `name`. Defaults to its URI."
+    ],
+    row_title: [
+      type: :atom,
+      doc: "A public attribute whose value is each row's resource `title`."
+    ],
+    row_description: [
+      type: :atom,
+      doc: "A public attribute whose value is each row's resource `description`."
+    ]
+  ]
+
+  @mcp_resource_template %Spark.Dsl.Entity{
+    name: :mcp_resource_template,
+    describe: """
+    Row-backed MCP resources (BLENDED-022): one MCP resource per row the `list` read action
+    returns for the caller, at the URI template expanded with the row's values. Reading one runs
+    the action with the values the URI carries, after reading the row as the caller. The
+    template itself is listed by `resources/templates/list`. See `AshAi.McpResourceTemplate`.
+    """,
+    examples: [
+      ~s(mcp_resource_template :artist, "mcp://artists/{id}", Artist, :profile, title: "Artist", mime_type: "text/markdown", row_title: :name)
+    ],
+    target: AshAi.McpResourceTemplate,
+    schema: @mcp_resource_template_schema,
+    args: [:name, :uri_template, :resource, :action]
+  }
+
   @mcp_resources %Spark.Dsl.Section{
     name: :mcp_resources,
     entities: [
       @mcp_resource,
-      @mcp_ui_resource
+      @mcp_ui_resource,
+      @mcp_resource_template
     ]
   }
 

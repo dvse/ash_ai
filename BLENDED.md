@@ -11,7 +11,7 @@ core Ash (`Ash.Info.Manifest`, action types, action metadata).
 
 ## DSL (domain and resource `tools` section)
 
-Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`, `mcp_ui_resource` (which gains `page`, BLENDED-020).
+Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`, `mcp_ui_resource` (which gains `page`, BLENDED-020). New in `mcp_resources`: `mcp_resource_template` (BLENDED-022).
 
 | Id | Addition | Shape | Source |
 |---|---|---|---|
@@ -34,6 +34,7 @@ Unchanged upstream entities: `tool`, `argument`, `mcp_resources`, `mcp_resource`
 | BLENDED-018 | `file_params` option (on `tool` and `interface`) | Names public action arguments of type `:map` or `{:array, :map}` that take files in the Apps SDK shape `{download_url, file_id, mime_type?, file_name?}`. Each leaves the `input` envelope and becomes a top-level `inputSchema` property with exactly the SDK's file object schema (or `{type: array, items: <it>}`), required at the top level when the argument is not nullable; `_meta["openai/fileParams"]` lists the names. On `tools/call`, each file field's value is checked for that shape (an array: 1 to 20 objects) and put back into the action input; a bad value is a tool error naming the field and the action does not run. `AshAi.McpActions`' `request` may carry `files` (a list), which the action receives as `context.mcp_files`. | OpenAI Apps SDK reference, "File APIs" (`openai/fileParams`, file schema, multiple files, runtime shape) |
 | BLENDED-019 | `initialize` version negotiation | A requested initialize-based revision that is supported is echoed; any other request is answered with the **latest** supported initialize-based revision (`2025-06-18`), not the oldest. **Upstream fix**: upstream answered `2025-03-26`; `protocol_2026_07_28_test.exs` ("initialize downgrades unsupported requested versions") and `mcp_action_test.exs` (an `initialize` without a version) now expect `2025-06-18`. | MCP 2025-11-25 lifecycle, "Version Negotiation" |
 | BLENDED-020 | `page` option on `mcp_ui_resource` (exactly one of `html_path`/`page`): a page of the application's UI framework as an MCP Apps view (`AshAi.Page`) | The view's template (`resources/read`) is the page's client document (`c:AshAi.Page.document/2`), at the authored URI, the same for every caller. Every action the page's view binds (`c:AshAi.Page.actions/1`), and the page's `:mount` as its open tool, become ordinary tools: name `<resource>_<action>` (open tool: the page's name), `_meta.ui = {resourceUri, visibility: ["app"]}`, listed for every served page view (the `mcp_resources` option) with upstream's `can?` pre-check, independent of the `tools` option. A call of any tool whose `_meta.ui.resourceUri` names a page view runs in the caller's page session (`AshAi.Page.session_id/2`, a digest of the actor's stable identity — an Ash record's resource and primary key, else its `id`, else the term — and the page). A generated tool refuses a caller without an actor; the author's linked tool then runs as upstream, without the page. Generated names that clash with any other tool of the server are refused when the server lists its tools, with the session's Ash context and owned inputs (`c:AshAi.Page.session/2`) filled by the server and hidden from the input schema; a page-resource action first mounts the row (optional `c:AshAi.Page.mount/3`), and a framework whose page rows are reachable only through its own dispatch runs the page's tools itself (optional `c:AshAi.Page.run/4`; the result is then `Done.` or the framework's error text). Its result is upstream's, plus `_meta["ash_ai/page"]`: the page rendered after the call (`c:AshAi.Page.render/3`: the framework's own render, plus `bindings` mapping each event key to `{tool, arguments, event, accept, boundField}`), also on an `isError` result (with its error texts). The framework is the page resource's extension exporting `mcp_page_adapter/0`; ash_ai depends on none (ash_blueprint: `AshBlueprint.Phoenix.McpPage`). Upstream's `html_path` form is unchanged. | MCP Apps 2026-01-26 (`ui://` resources, `_meta.ui.resourceUri`, `visibility: ["app"]`, view-initiated `tools/call`); OpenAI Apps SDK reference (`toolResponseMetadata`: "widget-only tool result metadata"); hyperbob-cloud `reports/mcp-apps-bobstack-ui-design-2026-10-03.md` |
+| BLENDED-022 | `mcp_resource_template` entity in `mcp_resources`: row-backed MCP resources, one per row (`AshAi.McpResourceTemplate`) | `mcp_resource_template :name, uri_template, Resource, :action, title:, description:, mime_type:, list:, row_name:, row_title:, row_description:`. `uri_template` is RFC 6570 level 1 (`{var}` only, at least one, none repeated); every variable is a public attribute of the resource and an argument of the action, a generic action returning `:string` (text) or `:binary` (blob); `list` (default: the primary read) is a read action; `row_*` name public attributes (`AshAi.Verifiers.VerifyMcpResourceTemplates`). `resources/templates/list` (both eras) lists each exposed template (`uriTemplate`, `name`, `title`, `description`, `mimeType`). `resources/list` adds one entry per row the `list` action returns for the caller (actor, tenant, context): `uri` the template expanded with the row's values (simple string expansion, percent-encoded), `name` the `row_name` value (default: the URI), `title`/`description` the `row_title`/`row_description` values when not nil, the template's `mimeType`; a row with a nil (or forbidden) variable is not listed. `resources/read` of a URI no static resource has matches the templates (in `uriTemplate` order), reads that row through `list` filtered by the decoded values as the caller, and only then runs the action with the values as arguments (over the read request's params for its other arguments, as upstream passes them to an `mcp_resource`). No row, a row the caller may not read, or a value the field cannot hold is "Resource not found". Exposure follows `mcp_resource`'s filters (`mcp_resources`, `actions`, `exclude_actions` over the content action). A template alone adds the `resources` capability, still without `listChanged` or `subscribe`: no notifications are sent. | MCP 2025-06-18 and 2025-11-25 server/resources (`resources/templates/list`, `ResourceTemplate`, `BlobResourceContents`); RFC 6570 level 1; OpenAI Bits & Bolts plugin (mcp-extensions 900032d, `src/server/register.ts` `registerPart`: one Markdown resource per part, `mcp://bits-and-bolts/parts/<id>`) |
 
 ## MCP server output (`AshAi.Mcp.Server`)
 
@@ -144,6 +145,21 @@ Details the table above leaves open, resolved while implementing this branch.
   is an Ash record, the actor term otherwise. Binding tool names are mapped by ash_ai from the
   framework's `{resource, action}`.
 
+- **BLENDED-022** — `AshAi.McpResourceTemplate` (`lib/ash_ai/mcp_resource_template.ex`) holds
+  the template rules (`variables/1`, `expand/2`, `match/2`). A variable matches one or more
+  unreserved characters or `%XX` escapes (what `expand/2` writes), so a URI with a `/` inside a
+  value, an empty value or a malformed escape matches nothing. The listing has no cursor
+  (upstream's `resources/list` has none): the list action bounds it (its pagination's default
+  limit, a preparation); a page's results are listed. A listing that is forbidden lists no rows;
+  any other listing error is logged and lists no rows, so `resources/list` still answers. Each decoded
+  value is cast with `Ash.Type.cast_input/3` to its attribute's type (a value that does not cast,
+  or casts to nil, names no row); the row read is `Ash.read_one/2` on the `list` action with an
+  equality filter per variable. No row or a `Forbidden` error is "Resource not found" (`-32002`;
+  `-32602` in 2026-07-28), any other error a read failure (`-32603`), as an action error is. The content action's policies apply as well; the row read is what makes a URI
+  readable exactly when the caller's listing would show it, whatever the action does. Row
+  entries sort with the static resources by `uri`. With 2026-07-28 the list is cacheable for
+  `list_ttl_ms` like the other lists.
+
 ## Tests (the oracle)
 
 Every BLENDED row has ExUnit coverage beside the upstream tests, and all upstream tests still
@@ -170,6 +186,11 @@ pass. The Bobstack port's parity rows are these tests plus upstream's.
   isolation, row bindings, error renders, anonymous refusal). Support: `test/support/page.ex`.
   The end-to-end proof with a real framework is ash_blueprint's Phoenix example
   (`packages/ash_blueprint_phoenix`, `script/serve_mcp_notes.exs`) under the MCP Apps harness.
+- `test/ash_ai/blended/row_resources_test.exs` — BLENDED-022 (the verifier's refusals, the URI
+  template, `resources/templates/list`, the capability, `resources/list` per caller, and
+  `resources/read`: the caller's row only, params, blob, errors, both eras). Support:
+  `test/support/row_resources.ex`, whose content actions read the row without authorization, so
+  only the server's row read keeps another caller's rows unreadable.
 - `test/COVERAGE.md` — per-module coverage before and after, and the new-line coverage check.
 
 ## Upstreaming

@@ -360,6 +360,16 @@ defmodule AshAi.Mcp.Server do
     response_2026_07_28(conn, 200, id, result)
   end
 
+  # BLENDED-022
+  defp dispatch_2026_07_28(conn, "resources/templates/list", id, _params, opts) do
+    result =
+      %{"resourceTemplates" => resource_template_definitions(opts)}
+      |> cacheable_result(opts, :list)
+      |> result_2026_07_28(opts)
+
+    response_2026_07_28(conn, 200, id, result)
+  end
+
   defp dispatch_2026_07_28(conn, "resources/read", id, %{"uri" => uri} = params, opts) do
     case read_resource_content(uri, params, nil, opts) do
       {:ok, content} ->
@@ -797,6 +807,16 @@ defmodule AshAi.Mcp.Server do
 
         {:json_response, Jason.encode!(response), session_id}
 
+      # BLENDED-022
+      %{"method" => "resources/templates/list", "id" => id} ->
+        response = %{
+          "jsonrpc" => "2.0",
+          "id" => id,
+          "result" => %{"resourceTemplates" => resource_template_definitions(opts)}
+        }
+
+        {:json_response, Jason.encode!(response), session_id}
+
       %{"method" => "resources/read", "id" => id, "params" => %{"uri" => uri} = params} ->
         case read_resource_content(uri, params, session_id, opts) do
           {:ok, content} ->
@@ -908,7 +928,8 @@ defmodule AshAi.Mcp.Server do
   defp capabilities(opts, client_capabilities) do
     resources = mcp_resources(opts)
 
-    resources
+    # BLENDED-022: a row-backed template alone also adds the resources capability.
+    (resources ++ mcp_resource_templates(opts))
     |> capabilities()
     |> maybe_add_ui_capability(resources, client_capabilities)
   end
@@ -963,6 +984,27 @@ defmodule AshAi.Mcp.Server do
       &Map.put(&1, :otp_app, opts[:otp_app])
     )
     |> AshAi.exposed_mcp_action_resources()
+  end
+
+  # BLENDED-022
+  defp mcp_resource_templates(opts) do
+    opts
+    |> Keyword.take([
+      :otp_app,
+      :tools,
+      :actor,
+      :context,
+      :tenant,
+      :actions,
+      :mcp_resources,
+      :exclude_actions
+    ])
+    |> Keyword.update(
+      :context,
+      %{otp_app: opts[:otp_app]},
+      &Map.put(&1, :otp_app, opts[:otp_app])
+    )
+    |> AshAi.exposed_mcp_resource_templates()
   end
 
   defp mcp_ui_resources(opts) do
@@ -1027,8 +1069,92 @@ defmodule AshAi.Mcp.Server do
       |> mcp_ui_resources()
       |> Enum.map(&ui_resource_to_map(&1, opts))
 
-    Enum.sort_by(action_resources ++ ui_resources, & &1["uri"])
+    Enum.sort_by(action_resources ++ ui_resources ++ row_resource_definitions(opts), & &1["uri"])
   end
+
+  # BLENDED-022: the templates, and one resource per row each template's list action returns
+  # for the caller.
+  defp resource_template_definitions(opts) do
+    opts
+    |> mcp_resource_templates()
+    |> Enum.map(fn template ->
+      %{
+        "uriTemplate" => template.uri_template,
+        "name" => Atom.to_string(template.name),
+        "title" => template.title,
+        "mimeType" => template.mime_type
+      }
+      |> put_if("description", template.description)
+    end)
+    |> Enum.sort_by(& &1["uriTemplate"])
+  end
+
+  defp row_resource_definitions(opts) do
+    opts
+    |> mcp_resource_templates()
+    |> Enum.flat_map(fn template ->
+      template.resource
+      |> Ash.Query.for_read(template.list.name, %{}, row_ash_opts(opts))
+      |> Ash.read(domain: template.domain)
+      |> case do
+        {:ok, %{results: rows}} ->
+          Enum.flat_map(rows, &row_resource_to_map(template, &1))
+
+        {:ok, rows} ->
+          Enum.flat_map(rows, &row_resource_to_map(template, &1))
+
+        {:error, %Ash.Error.Forbidden{}} ->
+          []
+
+        {:error, error} ->
+          Logger.warning(
+            "MCP resource template #{template.name} could not list its rows: " <>
+              AshAi.Tool.Errors.format(error)
+          )
+
+          []
+      end
+    end)
+  end
+
+  defp row_resource_to_map(%AshAi.McpResourceTemplate{} = template, row) do
+    {:ok, variables} = AshAi.McpResourceTemplate.variables(template.uri_template)
+
+    values =
+      Map.new(variables, fn variable ->
+        {variable, row_value(row, Ash.Resource.Info.attribute(template.resource, variable).name)}
+      end)
+
+    case AshAi.McpResourceTemplate.expand(template.uri_template, values) do
+      nil ->
+        []
+
+      uri ->
+        [
+          %{
+            "uri" => uri,
+            "name" => row_value(row, template.row_name) || uri,
+            "mimeType" => template.mime_type
+          }
+          |> put_if("title", row_value(row, template.row_title))
+          |> put_if("description", row_value(row, template.row_description))
+        ]
+    end
+  end
+
+  defp row_value(_row, nil), do: nil
+
+  defp row_value(row, field) do
+    case Map.get(row, field) do
+      nil -> nil
+      %Ash.ForbiddenField{} -> nil
+      %Ash.NotLoaded{} -> nil
+      value -> to_string(value)
+    end
+  end
+
+  defp row_ash_opts(opts),
+    do: Keyword.take(opts, [:actor, :tenant, :context, :authorize?, :tracer, :scope])
 
   defp execute_tool_call(params, session_id, opts) do
     tool_name = params["name"]
@@ -1400,10 +1526,15 @@ defmodule AshAi.Mcp.Server do
         case resource do
           %AshAi.McpUiResource{} -> AshAi.McpUiResource.mime_type()
           %AshAi.McpResource{mime_type: mt} -> mt
+          {%AshAi.McpResourceTemplate{mime_type: mt}, _values} -> mt
         end
 
       content =
-        %{"uri" => uri, "mimeType" => mime_type, "text" => text}
+        case text do
+          # BLENDED-022: a binary result is blob contents.
+          {:blob, blob} -> %{"uri" => uri, "mimeType" => mime_type, "blob" => blob}
+          text -> %{"uri" => uri, "mimeType" => mime_type, "text" => text}
+        end
         |> then(fn content ->
           case resource do
             %AshAi.McpUiResource{} = mcp_ui_resource ->
@@ -1421,9 +1552,22 @@ defmodule AshAi.Mcp.Server do
 
   defp find_mcp_resource_by_uri(uri, opts) do
     case Enum.find(mcp_resources(opts), &(&1.uri == uri)) do
-      nil -> {:error, :not_found}
+      nil -> find_mcp_resource_template(uri, opts)
       resource -> {:ok, resource}
     end
+  end
+
+  # BLENDED-022: the first template (in `uriTemplate` order) the URI matches.
+  defp find_mcp_resource_template(uri, opts) do
+    opts
+    |> mcp_resource_templates()
+    |> Enum.sort_by(& &1.uri_template)
+    |> Enum.find_value({:error, :not_found}, fn template ->
+      case AshAi.McpResourceTemplate.match(template.uri_template, uri) do
+        {:ok, values} -> {:ok, {template, values}}
+        :error -> nil
+      end
+    end)
   end
 
   # BLENDED-020: a page view's template is the page's client document.
@@ -1478,6 +1622,61 @@ defmodule AshAi.Mcp.Server do
     |> Ash.ActionInput.for_action(action.name, params, ash_opts)
     |> Ash.run_action()
     |> case do
+      {:error, error} ->
+        {:error, AshAi.Tool.Errors.format(error)}
+
+      result ->
+        result
+    end
+  end
+
+  # BLENDED-022: the row is read through the list action as the caller first, so a URI is
+  # readable exactly when its row is listed for the caller. A value the field cannot hold
+  # names no row.
+  defp read_mcp_resource({%AshAi.McpResourceTemplate{} = template, values}, params, opts) do
+    with {:ok, filter} <- row_filter(template, values),
+         {:ok, %_{}} <-
+           template.resource
+           |> Ash.Query.for_read(template.list.name, %{}, row_ash_opts(opts))
+           |> Ash.Query.do_filter(filter)
+           |> Ash.read_one(domain: template.domain) do
+      run_template_action(
+        template,
+        Map.merge(take_valid_params(params, template.action), values),
+        opts
+      )
+    else
+      {:ok, nil} -> {:error, :not_found}
+      :error -> {:error, :not_found}
+      {:error, %Ash.Error.Forbidden{}} -> {:error, :not_found}
+      {:error, error} -> {:error, AshAi.Tool.Errors.format(error)}
+    end
+  end
+
+  defp row_filter(template, values) do
+    Enum.reduce_while(values, {:ok, []}, fn {variable, value}, {:ok, filter} ->
+      attribute = Ash.Resource.Info.attribute(template.resource, variable)
+
+      case Ash.Type.cast_input(attribute.type, value, attribute.constraints) do
+        {:ok, cast} when not is_nil(cast) -> {:cont, {:ok, [{attribute.name, cast} | filter]}}
+        _ -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp run_template_action(template, input, opts) do
+    ash_opts =
+      opts
+      |> Keyword.take([:context, :authorize?, :tenant, :scope, :actor, :tracer])
+      |> Keyword.put(:domain, template.domain)
+
+    template.resource
+    |> Ash.ActionInput.for_action(template.action.name, input, ash_opts)
+    |> Ash.run_action()
+    |> case do
+      {:ok, value} when is_binary(value) and template.action.returns == Ash.Type.Binary ->
+        {:ok, {:blob, Base.encode64(value)}}
+
       {:error, error} ->
         {:error, AshAi.Tool.Errors.format(error)}
 
