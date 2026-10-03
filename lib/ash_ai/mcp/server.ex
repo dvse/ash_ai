@@ -1216,6 +1216,8 @@ defmodule AshAi.Mcp.Server do
       }
       |> put_if("outputSchema", AshAi.Tool.Schema.output_for_tool(tool))
       |> put_meta(Map.merge(Tool.meta(tool), AshAi.Tool.OpenAi.file_params_meta(tool)))
+      # BLENDED-024: a misdeclared `argument_choices` is refused when the tool is listed.
+      |> tap(fn _definition -> Elicitation.argument_choices(tool) end)
       |> put_security_schemes(AshAi.Tool.OpenAi.security_schemes(tool, opts[:security_schemes]))
     end)
     |> Enum.sort_by(& &1["name"])

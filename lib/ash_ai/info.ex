@@ -119,6 +119,7 @@ defmodule AshAi.Info do
       security_schemes: exposed.security_schemes,
       file_params: exposed.file_params,
       elicit_missing?: exposed.elicit_missing?,
+      argument_choices: exposed.argument_choices,
       load: [],
       async: true,
       arguments: [],

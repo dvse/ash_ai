@@ -24,6 +24,8 @@ defmodule AshAi.Tool.Elicitation do
   alias AshAi.Tool
   alias AshAi.Tool.Execution
 
+  require Logger
+
   @input_key "missing_input"
 
   @elicitable [
@@ -105,7 +107,8 @@ defmodule AshAi.Tool.Elicitation do
       when dialect in [:openai, :standard] do
     with {:ok, [_ | _] = errors} <- Execution.input_errors(tool, arguments, context),
          {:ok, fields} <- elicitable_fields(tool, errors),
-         {:ok, schema} <- requested_schema(tool, fields, missing(errors), answered, dialect) do
+         {:ok, schema} <-
+           requested_schema(tool, fields, missing(errors), answered, dialect, context) do
       {:input_required,
        %{
          "method" => method(dialect),
@@ -190,8 +193,9 @@ defmodule AshAi.Tool.Elicitation do
   @doc false
   # The form schema of `fields` (`{resource, action, [{name, argument_or_attribute}]}`), with the
   # answered fields too. `:error` when one of them has no form representation.
-  def requested_schema(tool, {resource, action, fields}, missing, answered, dialect) do
+  def requested_schema(tool, {resource, action, fields}, missing, answered, dialect, context) do
     inputs = declared_inputs(tool)
+    choices = Map.new(argument_choices(tool))
 
     answered_fields =
       answered
@@ -208,7 +212,7 @@ defmodule AshAi.Tool.Elicitation do
     Enum.reduce_while(fields, {:ok, %{}, []}, fn {name, field}, {:ok, properties, required} ->
       key = to_string(name)
 
-      case property(field, resource, action, dialect) do
+      case property(field, resource, action, dialect, choices[name], context) do
         {:ok, property} ->
           property = put_default(property, Map.get(answered, key))
 
@@ -238,12 +242,19 @@ defmodule AshAi.Tool.Elicitation do
   # field's own (`min`/`max` arrive as `minimum`/`maximum`; `min_length`/`max_length` become
   # `minLength`/`maxLength`, or `minItems`/`maxItems` on an array; `match` becomes `pattern` in
   # the OpenAI dialect, whose extended string schema admits it).
-  defp property(field, resource, action, dialect) do
+  defp property(field, resource, action, dialect, choices, context) do
     {type, constraints} = resolved_type(field.type, field.constraints || [])
 
-    field
-    |> AshAi.OpenApi.resource_write_attribute_type(resource, action.type)
-    |> primitive(type, constraints, dialect)
+    case choices do
+      nil ->
+        field
+        |> AshAi.OpenApi.resource_write_attribute_type(resource, action.type)
+        |> primitive(type, constraints, dialect)
+
+      choices ->
+        # BLENDED-024
+        choice_property(type, constraints, list_choices(choices, dialect, context))
+    end
     |> case do
       {:ok, property} ->
         {:ok,
@@ -297,6 +308,147 @@ defmodule AshAi.Tool.Elicitation do
 
       _other ->
         :error
+    end
+  end
+
+  @doc """
+  The tool's `argument_choices` (BLENDED-024), checked against its action and the choices'
+  resources: `[{input, %{resource, action, value, title, thumbnail}}]`. Each key must be an
+  input the tool's schema declares, the tool must elicit missing input, `action` a read action of
+  `resource` (default: the tool's resource), and `value`, `title` (default: `value`) and
+  `thumbnail` public attributes of it. Raises `ArgumentError` naming the tool otherwise.
+  """
+  def argument_choices(%Tool{argument_choices: choices}) when choices in [nil, []], do: []
+
+  def argument_choices(%Tool{argument_choices: choices} = tool) do
+    unless tool.elicit_missing? do
+      raise ArgumentError,
+            "tool #{inspect(tool.name)}: argument_choices needs elicit_missing?: true"
+    end
+
+    inputs = declared_inputs(tool)
+
+    Enum.map(choices, fn {name, options} ->
+      unless Map.has_key?(inputs, name) do
+        raise ArgumentError,
+              "tool #{inspect(tool.name)}: argument_choices names #{inspect(name)}, which is " <>
+                "not an input of action #{inspect(tool.action.name)}"
+      end
+
+      resource = options[:resource] || tool.resource
+      action = options[:action] && Ash.Resource.Info.action(resource, options[:action])
+
+      unless match?(%{type: :read}, action) do
+        raise ArgumentError,
+              "tool #{inspect(tool.name)}: argument_choices #{inspect(name)} action " <>
+                "#{inspect(options[:action])} is not a read action of #{inspect(resource)}"
+      end
+
+      fields =
+        for key <- [:value, :title, :thumbnail], into: %{} do
+          field = if key == :title, do: options[:title] || options[:value], else: options[key]
+
+          if field != nil and
+               not match?(%{public?: true}, Ash.Resource.Info.attribute(resource, field)) do
+            raise ArgumentError,
+                  "tool #{inspect(tool.name)}: argument_choices #{inspect(name)} #{key} " <>
+                    "#{inspect(field)} is not a public attribute of #{inspect(resource)}"
+          end
+
+          {key, field}
+        end
+
+      if is_nil(fields.value) do
+        raise ArgumentError,
+              "tool #{inspect(tool.name)}: argument_choices #{inspect(name)} needs a value"
+      end
+
+      {name, Map.merge(fields, %{resource: resource, action: action})}
+    end)
+  end
+
+  # BLENDED-024: the rows the choices' read action returns for the caller (its actor, tenant and
+  # context, through the resource's policies), as titled `const` options. A row without a value
+  # is not offered. A forbidden listing offers nothing; any other listing error is logged and
+  # offers nothing. In the OpenAI dialect an option carries its row's thumbnail as
+  # `x-openai-thumbnail` (an MCP `Icon`; a `data:` URL's media type is its `mimeType`).
+  defp list_choices(choices, dialect, context) do
+    choices.resource
+    |> Ash.Query.for_read(choices.action.name, %{},
+      actor: context[:actor],
+      tenant: context[:tenant],
+      context: context[:context] || %{}
+    )
+    |> Ash.read()
+    |> case do
+      {:ok, %{results: rows}} ->
+        rows
+
+      {:ok, rows} ->
+        rows
+
+      {:error, %Ash.Error.Forbidden{}} ->
+        []
+
+      {:error, error} ->
+        Logger.warning(
+          "argument_choices of #{inspect(choices.resource)} could not be listed: " <>
+            AshAi.Tool.Errors.format(error)
+        )
+
+        []
+    end
+    |> Enum.flat_map(fn row ->
+      case row_text(row, choices.value) do
+        nil ->
+          []
+
+        value ->
+          [
+            %{"const" => value, "title" => row_text(row, choices.title) || value}
+            |> put_thumbnail(dialect, row_text(row, choices.thumbnail))
+          ]
+      end
+    end)
+  end
+
+  defp row_text(_row, nil), do: nil
+
+  defp row_text(row, field) do
+    case Map.get(row, field) do
+      nil -> nil
+      %Ash.ForbiddenField{} -> nil
+      %Ash.NotLoaded{} -> nil
+      value -> to_string(value)
+    end
+  end
+
+  defp put_thumbnail(option, :openai, src) when is_binary(src) do
+    icon =
+      case Regex.run(~r/\Adata:([^;,]+)[;,]/, src) do
+        [_match, mime_type] -> %{"src" => src, "mimeType" => mime_type}
+        nil -> %{"src" => src}
+      end
+
+    Map.put(option, "x-openai-thumbnail", icon)
+  end
+
+  defp put_thumbnail(option, _dialect, _src), do: option
+
+  # A field with choices is MCP's `TitledSingleSelectEnumSchema` (`oneOf`), or for an array
+  # `TitledMultiSelectEnumSchema` (`items.anyOf`).
+  defp choice_property({:array, _item_type}, constraints, options) do
+    {:ok,
+     %{"type" => "array", "items" => %{"anyOf" => options}}
+     |> put_present("minItems", constraints[:min_length])
+     |> put_present("maxItems", constraints[:max_length])}
+  end
+
+  defp choice_property(type, _constraints, options) do
+    if Ash.Type.get_type(type) in [Ash.Type.Map, Ash.Type.Union, Ash.Type.Struct] do
+      :error
+    else
+      {:ok, %{"type" => "string", "oneOf" => options}}
     end
   end
 

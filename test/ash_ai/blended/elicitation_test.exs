@@ -7,10 +7,12 @@ defmodule AshAi.Blended.ElicitationTest do
   BLENDED-023: `elicit_missing?` — missing input of a tool call is asked of the user as a form
   (MCP 2026-07-28 `input_required` results; a server-to-client `elicitation/create` request on
   initialize-based connections), validated before the action runs, and the action runs once.
+  BLENDED-024: `argument_choices` — a form field's choices are the rows a read action returns for
+  the caller.
   """
   use ExUnit.Case, async: false
 
-  alias AshAi.Test.Elicitation.{Endpoint, Order}
+  alias AshAi.Test.Elicitation.{Endpoint, Order, Part}
 
   @alice %{name: "alice"}
   @standard %{"elicitation" => %{}}
@@ -22,7 +24,8 @@ defmodule AshAi.Blended.ElicitationTest do
     :attach_spec,
     :reprice_order,
     :orders_by_part,
-    :quote_order
+    :quote_order,
+    :order_part
   ]
   @server_info %{
     "io.modelcontextprotocol/serverInfo" => %{"name" => "MCP Server", "version" => "1.1.1"}
@@ -30,6 +33,17 @@ defmodule AshAi.Blended.ElicitationTest do
 
   setup do
     for order <- Ash.read!(Order, authorize?: false), do: Ash.destroy!(order, authorize?: false)
+    for part <- Ash.read!(Part, authorize?: false), do: Ash.destroy!(part, authorize?: false)
+
+    for {id, name, preview, owner} <- [
+          {"p1", "Hex bolt", "data:image/png;base64,iVBORw0KGgo=", "alice"},
+          {"p2", "Washer", "https://example.com/washer.png", "alice"},
+          {"p3", "Nut", nil, "alice"},
+          {"b1", "Gear", "https://example.com/gear.png", "bob"}
+        ] do
+      Ash.create!(Part, %{id: id, name: name, preview: preview, owner: owner, secret: "s"})
+    end
+
     :ok
   end
 
@@ -491,11 +505,125 @@ defmodule AshAi.Blended.ElicitationTest do
     end
   end
 
+  describe "argument_choices (BLENDED-024)" do
+    test "the choices are the rows the caller may read, as titled options" do
+      assert %{"inputRequests" => %{"missing_input" => %{"params" => params}}} =
+               call("order_part", %{}, @standard)
+
+      assert params["requestedSchema"] == %{
+               "type" => "object",
+               "properties" => %{
+                 "part" => %{
+                   "type" => "string",
+                   "title" => "Part",
+                   "description" => "The CAD part.",
+                   "oneOf" => [
+                     %{"const" => "p1", "title" => "Hex bolt"},
+                     %{"const" => "p2", "title" => "Washer"},
+                     %{"const" => "p3", "title" => "Nut"}
+                   ]
+                 }
+               },
+               "required" => ["part"]
+             }
+    end
+
+    test "a row the caller's policies hide is not offered" do
+      assert %{"inputRequests" => %{"missing_input" => %{"params" => params}}} =
+               call("order_part", %{}, @standard, %{}, %{name: "bob"})
+
+      assert params["requestedSchema"]["properties"]["part"]["oneOf"] == [
+               %{"const" => "b1", "title" => "Gear"}
+             ]
+
+      assert %{"inputRequests" => %{"missing_input" => %{"params" => params}}} =
+               call("order_part", %{}, @standard, %{}, %{name: "carol"})
+
+      assert params["requestedSchema"]["properties"]["part"]["oneOf"] == []
+    end
+
+    test "the OpenAI form carries each row's thumbnail" do
+      assert %{"inputRequests" => %{"missing_input" => %{"params" => params}}} =
+               call("order_part", %{}, @openai)
+
+      assert params["requestedSchema"]["properties"]["part"]["oneOf"] == [
+               %{
+                 "const" => "p1",
+                 "title" => "Hex bolt",
+                 "x-openai-thumbnail" => %{
+                   "src" => "data:image/png;base64,iVBORw0KGgo=",
+                   "mimeType" => "image/png"
+                 }
+               },
+               %{
+                 "const" => "p2",
+                 "title" => "Washer",
+                 "x-openai-thumbnail" => %{"src" => "https://example.com/washer.png"}
+               },
+               %{"const" => "p3", "title" => "Nut"}
+             ]
+    end
+
+    test "an array input offers its choices as a multi-select" do
+      assert %{"inputRequests" => %{"missing_input" => %{"params" => params}}} =
+               call("order_part", %{"input" => %{"part" => "p1", "extras" => []}}, @standard)
+
+      assert params["requestedSchema"]["properties"] == %{
+               "extras" => %{
+                 "type" => "array",
+                 "title" => "Extras",
+                 "items" => %{
+                   "anyOf" => [
+                     %{"const" => "p1", "title" => "p1"},
+                     %{"const" => "p2", "title" => "p2"},
+                     %{"const" => "p3", "title" => "p3"}
+                   ]
+                 },
+                 "minItems" => 1,
+                 "maxItems" => 2
+               }
+             }
+    end
+
+    test "a chosen answer runs the action once" do
+      assert %{"isError" => false, "structuredContent" => %{"part" => "p2"}} =
+               call("order_part", %{}, @openai, %{"inputResponses" => accept(%{"part" => "p2"})})
+
+      assert rows() == 1
+    end
+
+    test "a misdeclared argument_choices is refused when the tool is listed" do
+      for {tool, message} <- [
+            {:choices_not_input,
+             "tool :choices_not_input: argument_choices names :nope, which is not an input of action :order_part"},
+            {:choices_not_read,
+             "tool :choices_not_read: argument_choices :part action :create is not a read action of AshAi.Test.Elicitation.Part"},
+            {:choices_private,
+             "tool :choices_private: argument_choices :part value :secret is not a public attribute of AshAi.Test.Elicitation.Part"},
+            {:choices_not_elicited,
+             "tool :choices_not_elicited: argument_choices needs elicit_missing?: true"}
+          ] do
+        assert_raise ArgumentError, message, fn ->
+          # A raise inside the router reaches the caller wrapped by Plug; unwrap it.
+          try do
+            Plug.Test.conn(:post, "/", %{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/list"})
+            |> Ash.PlugHelpers.set_actor(@alice)
+            |> AshAi.Mcp.Router.call(
+              AshAi.Mcp.Router.init(otp_app: :ash_ai, tools: [tool], actions: [{Order, :*}])
+            )
+          rescue
+            error in Plug.Conn.WrapperError -> reraise error.reason, error.stack
+          end
+        end
+      end
+    end
+  end
+
   defp accept(content), do: %{"missing_input" => %{"action" => "accept", "content" => content}}
 
   defp rows, do: Order |> Ash.read!(authorize?: false) |> length()
 
-  defp call(name, arguments, capabilities, params \\ %{}) do
+  defp call(name, arguments, capabilities, params \\ %{}, actor \\ @alice) do
     meta = %{
       "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
       "io.modelcontextprotocol/clientCapabilities" => capabilities
@@ -512,7 +640,7 @@ defmodule AshAi.Blended.ElicitationTest do
     |> Plug.Conn.put_req_header("mcp-protocol-version", "2026-07-28")
     |> Plug.Conn.put_req_header("mcp-method", "tools/call")
     |> Plug.Conn.put_req_header("mcp-name", name)
-    |> Ash.PlugHelpers.set_actor(@alice)
+    |> Ash.PlugHelpers.set_actor(actor)
     |> AshAi.Mcp.Router.call(router_opts([]))
     |> then(&Jason.decode!(&1.resp_body)["result"])
   end

@@ -120,6 +120,13 @@ defmodule AshAi.Dsl do
       default: false,
       doc:
         "Ask the user for missing input. An MCP `tools/call` builds the action's input first, without running it; when every error is a missing or invalid value of an input the tool's schema declares, the call is answered with a form elicitation request for exactly those inputs (an `input_required` result in MCP 2026-07-28, a server-to-client `elicitation/create` request on initialize-based connections that can stream), and the client calls again with the answers. The action then runs once, as any call does. Only when the client declares form elicitation (or the `openai/elicitation` extension's `form`); otherwise the call runs as it would without the option."
+    ],
+    # BLENDED-024: the choices of an elicited input, listed by a read action
+    argument_choices: [
+      type: :keyword_list,
+      default: [],
+      doc:
+        "Inputs whose form field (BLENDED-023, `elicit_missing?`) offers the rows of a read action as its choices: `[part: [action: :read, value: :id, title: :name, thumbnail: :preview]]`, with `resource` defaulting to the tool's resource and `title` to `value`. The rows are listed by running the action as the caller (actor, tenant, context, through the resource's policies) when the form is built, as `oneOf: [%{const, title}]` (`items.anyOf` for an array), and in the OpenAI dialect each option carries its `thumbnail` value as `x-openai-thumbnail`."
     ]
   ]
 
