@@ -17,12 +17,14 @@ defmodule AshAi do
     transformers: [
       AshAi.Transformers.Vectorize,
       AshAi.Transformers.ResourceTools,
-      AshAi.Transformers.McpApps
+      AshAi.Transformers.McpApps,
+      AshAi.McpEvents.Transformers.AddEmit
     ],
     verifiers: [
       AshAi.Verifiers.McpResourceActionsReturnString,
       AshAi.Verifiers.VerifyExposures,
-      AshAi.Verifiers.VerifyMcpResourceTemplates
+      AshAi.Verifiers.VerifyMcpResourceTemplates,
+      AshAi.McpEvents.Verifiers.VerifyEvents
     ]
 
   defmodule Tool do

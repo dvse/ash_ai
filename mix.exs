@@ -162,6 +162,8 @@ defmodule AshAi.MixProject do
       {:req_llm, "~> 1.24", optional: true},
       {:ash_postgres, "~> 2.5", optional: true},
       {:ash_oban, "~> 0.5", optional: true},
+      # BLENDED-026: MCP Events storage and delivery run as AshQueue spaces.
+      {:ash_queue, path: "../ash_queue", optional: true},
       {:ash_phoenix, "~> 2.0", optional: true},
       {:igniter, "~> 0.5", optional: true},
       {:plug, "~> 1.17", optional: true},

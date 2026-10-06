@@ -23,6 +23,11 @@ if Code.ensure_loaded?(Plug) do
     the resolved `%AshAi.Tool{}`, its argument map, and the request's Ash tool
     context. It must return `{:ok, arguments}` or `{:error, message}`. Rejections
     are rendered as ordinary MCP tool errors in the selected protocol envelope.
+
+    An `events` option names the domains whose MCP events the endpoint serves
+    (`events/list`, `events/subscribe`, `events/unsubscribe`, BLENDED-026), or
+    `false` for none; by default, every domain of the `otp_app` that names
+    `mcp_events` storage. See `AshAi.McpEvents`.
     """
 
     use Plug.Router, copy_opts_to_assign: :router_opts

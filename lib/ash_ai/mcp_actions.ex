@@ -81,6 +81,11 @@ defmodule AshAi.McpActions do
         type: {:list, :map},
         doc:
           "Default `securitySchemes` of every tool that declares none (BLENDED-016; the router's `security_schemes` option)."
+      ],
+      events: [
+        type: {:or, [{:literal, false}, {:wrap_list, :atom}]},
+        doc:
+          "Domains whose MCP events the endpoint serves, or `false` for none (BLENDED-026; the router's `events` option). Defaults to the `otp_app`'s domains that name `mcp_events` storage."
       ]
     ],
     entities: []

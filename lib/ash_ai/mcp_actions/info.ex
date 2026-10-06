@@ -22,7 +22,8 @@ defmodule AshAi.McpActions.Info do
     :read_ttl_ms,
     :cache_scope,
     :resource_metadata_url,
-    :security_schemes
+    :security_schemes,
+    :events
   ]
 
   @doc "Name of the synthesized MCP action. Defaults to `:mcp`."

@@ -631,8 +631,118 @@ defmodule AshAi.Dsl do
     ]
   }
 
+  # BLENDED-026: MCP Events. The section serves resources (`event` entities) and domains (the
+  # storage options); `AshAi.McpEvents.Verifiers.VerifyEvents` refuses each in the other place.
+  @mcp_event %Spark.Dsl.Entity{
+    name: :event,
+    describe: """
+    An MCP event (BLENDED-026) of this resource, listed by `events/list` and delivered as a webhook
+    to its subscribers. Exactly one source: `states`, `action` or `becomes_current?`. See
+    `AshAi.McpEvents`.
+    """,
+    examples: [
+      """
+      event "ticket.closed" do
+        description "A ticket was closed or rejected."
+        states [:closed, :rejected]
+        filter [:id, :project_id]
+        payload [:id, :title, :state]
+      end
+      """
+    ],
+    target: AshAi.McpEvent,
+    identifier: :name,
+    args: [:name],
+    schema: [
+      name: [
+        type: :string,
+        required: true,
+        doc: "The event name, dot-separated lower-case segments (`ticket.closed`)."
+      ],
+      description: [
+        type: :string,
+        doc: "What happened, for the model deciding whether to subscribe."
+      ],
+      states: [
+        type: {:list, :atom},
+        doc:
+          "Source: the resource's AshQueue space attribute moved into one of these states (on any create or update)."
+      ],
+      space: [
+        type: :atom,
+        doc: "The space `states` belong to; needed only when the resource has several spaces."
+      ],
+      action: [
+        type: :atom,
+        doc: "Source: this create, update or destroy action of the resource ran."
+      ],
+      becomes_current?: [
+        type: :boolean,
+        default: false,
+        doc:
+          "Source: a temporal version became current. Refused: Ash has no temporal resources (BLENDED-026)."
+      ],
+      filter: [
+        type: {:list, :atom},
+        default: [],
+        doc:
+          "Public attributes a subscriber may filter on; each becomes an optional `inputSchema` property."
+      ],
+      payload: [
+        type: {:list, :atom},
+        doc:
+          "Public attributes delivered as the event's `data` (all required in `payloadSchema`). Defaults to every public attribute."
+      ]
+    ]
+  }
+
+  @mcp_events %Spark.Dsl.Section{
+    name: :mcp_events,
+    describe: """
+    MCP Events (BLENDED-026). On a resource: its `event` declarations. On a domain: the storage
+    resources and the transport. A domain that names its storage also serves one default event per
+    terminal state of every AshQueue space of its resources. See `AshAi.McpEvents`.
+    """,
+    entities: [@mcp_event],
+    schema: [
+      subscription: [
+        type: :module,
+        doc: "Domain only: the subscription resource (`use AshAi.McpEvents.Subscription`)."
+      ],
+      occurrence: [
+        type: :module,
+        doc: "Domain only: the occurrence resource (`use AshAi.McpEvents.Occurrence`)."
+      ],
+      delivery: [
+        type: :module,
+        doc: "Domain only: the delivery resource (`use AshAi.McpEvents.Delivery`)."
+      ],
+      sender: [
+        type: {:behaviour, AshAi.McpEvents.Sender},
+        doc: "Domain only: the transport. Defaults to `AshAi.McpEvents.Sender.Req`."
+      ],
+      sender_options: [
+        type: :keyword_list,
+        default: [],
+        doc: "Domain only: options passed to every sender callback."
+      ],
+      actor_persister: [
+        type: :module,
+        doc:
+          "Domain only: an `AshQueue.ActorPersister` that stores a subscriber's actor on its subscription row, so `collect` reads as the subscriber. Defaults to `config :ash_queue, :actor_persister`, then `AshAi.McpEvents.ActorPersister` (Ash records by primary key)."
+      ],
+      defaults?: [
+        type: :boolean,
+        default: true,
+        doc:
+          "Domain only: generate one event per terminal state of every AshQueue space of the domain's resources."
+      ]
+    ],
+    no_depend_modules: [:subscription, :occurrence, :delivery]
+  }
+
   @doc false
   def sections do
-    [@tools, @vectorize, @mcp_resources]
+    [@tools, @vectorize, @mcp_resources, @mcp_events]
   end
 end

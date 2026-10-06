@@ -591,6 +591,20 @@ defmodule AshAi.Mcp.Server do
     |> send_sse_event("message", Jason.encode!(close))
   end
 
+  # BLENDED-026: MCP Events.
+  defp dispatch_2026_07_28(conn, "events/" <> _ = method, id, params, opts) do
+    case events_result(method, params, opts) do
+      {:ok, result} ->
+        response_2026_07_28(conn, 200, id, result_2026_07_28(result, opts))
+
+      {:error, code, message, data} ->
+        error_response_2026_07_28(conn, 200, id, code, message, data)
+
+      :unknown ->
+        error_response_2026_07_28(conn, 404, id, -32_601, "Method not found: #{method}")
+    end
+  end
+
   defp dispatch_2026_07_28(conn, "initialize", id, _params, _opts) do
     # Removed in 2026-07-28. Name the supported versions in the error —
     # initialize-based clients have no fall-forward mechanism, so this may
@@ -1081,6 +1095,30 @@ defmodule AshAi.Mcp.Server do
             {:json_response, Jason.encode!(response), session_id}
         end
 
+      # BLENDED-026: MCP Events.
+      %{"method" => "events/" <> _ = method, "id" => id} = request ->
+        response =
+          case events_result(method, Map.get(request, "params"), opts) do
+            {:ok, result} ->
+              %{"jsonrpc" => "2.0", "id" => id, "result" => result}
+
+            {:error, code, message, data} ->
+              %{
+                "jsonrpc" => "2.0",
+                "id" => id,
+                "error" => maybe_put(%{"code" => code, "message" => message}, "data", data)
+              }
+
+            :unknown ->
+              %{
+                "jsonrpc" => "2.0",
+                "id" => id,
+                "error" => %{"code" => -32_601, "message" => "Method not implemented: #{method}"}
+              }
+          end
+
+        {:json_response, Jason.encode!(response), session_id}
+
       %{"method" => method, "id" => id, "params" => _params} ->
         # Handle other requests with IDs (requiring responses)
         response = %{
@@ -1121,6 +1159,40 @@ defmodule AshAi.Mcp.Server do
     (resources ++ mcp_resource_templates(opts))
     |> capabilities()
     |> maybe_add_ui_capability(resources, client_capabilities)
+    |> maybe_add_events_capability(opts)
+  end
+
+  # BLENDED-026: `events: {}` when the server serves at least one event.
+  defp maybe_add_events_capability(capabilities, opts) do
+    if AshAi.McpEvents.Subscriptions.catalog(opts) == [] do
+      capabilities
+    else
+      Map.put(capabilities, "events", %{})
+    end
+  end
+
+  # BLENDED-026: `events/list`, `events/subscribe` and `events/unsubscribe`, the same in both
+  # protocol eras. A server serving no event answers them as unknown methods (`:unknown`), as
+  # upstream answers any method it does not implement.
+  defp events_result(method, params, opts) do
+    alias AshAi.McpEvents.Subscriptions
+
+    params = if is_map(params), do: Map.delete(params, "_meta"), else: params
+
+    cond do
+      method not in ["events/list", "events/subscribe", "events/unsubscribe"] or
+          Subscriptions.catalog(opts) == [] ->
+        :unknown
+
+      method == "events/list" ->
+        {:ok, Subscriptions.list(opts)}
+
+      method == "events/subscribe" ->
+        Subscriptions.subscribe(params, opts)
+
+      method == "events/unsubscribe" ->
+        Subscriptions.unsubscribe(params, opts)
+    end
   end
 
   defp maybe_add_ui_capability(capabilities, resources, client_capabilities) do
